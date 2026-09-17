@@ -53,6 +53,7 @@ jobs:
           python -m pytest -q
           tests/security/test_s3_canonical_event_journal.py
           tests/security/test_s3_canonical_projections.py
+          tests/security/test_s3_sql_projection_reconciliation.py
           tests/security/test_s3_truthful_live_state.py
           tests/security/test_s3_real_isolation_rollback.py
           tests/security/test_s3_control_plane_auth.py

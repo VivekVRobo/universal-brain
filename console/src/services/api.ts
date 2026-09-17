@@ -66,8 +66,9 @@ export class ApiClient {
     return res.json();
   }
 
-  static async getCurrentContract(): Promise<ContractDetail> {
+  static async getCurrentContract(): Promise<ContractDetail | null> {
     const res = await authenticatedFetch(`${API_BASE}/contracts/current`);
+    if (res.status === 404) return null;
     if (!res.ok) throw new Error(`Contract fetch failed: ${res.status}`);
     return res.json();
   }

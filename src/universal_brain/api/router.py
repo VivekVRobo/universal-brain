@@ -319,8 +319,14 @@ async def list_pending_actions(
 
     for p in proposals:
         seconds_left = max(0, int((p.expires_at - now).total_seconds()))
-        # Compute temporary authorization digest for display
-        auth_digest = p.compute_authorization_digest("operator-preview", now)
+        # The digest is a review fingerprint, not an identity credential. Bind it
+        # to the authenticated server-side operator identity and expose the exact
+        # timestamp required to reproduce it during approval validation.
+        authorization_approved_at = now
+        auth_digest = p.compute_authorization_digest(
+            settings.operator_id,
+            authorization_approved_at,
+        )
         responses.append(
             ActionProposalResponse(
                 action_id=p.action_id,
@@ -338,6 +344,8 @@ async def list_pending_actions(
                 evidence_items_count=p.evidence_items_count,
                 payload_hash=p.compute_payload_hash(),
                 authorization_digest=auth_digest,
+                authorization_approved_at=authorization_approved_at,
+                nonce=p.nonce,
                 created_at=p.created_at,
                 expires_at=p.expires_at,
                 seconds_remaining=seconds_left,

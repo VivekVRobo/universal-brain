@@ -35,10 +35,10 @@ export interface RuntimeHealth {
   budget_spend_usd: number;
   monthly_budget_usd: number;
   budget_tier: string;
-  active_model_lease: string;
-  lease_expires_in_seconds: number;
+  active_model_lease?: string | null;
+  lease_expires_in_seconds?: number | null;
   active_actions_count: number;
-  contract_version: number;
+  contract_version?: number | null;
   system_mode: SystemMode;
 }
 
@@ -46,9 +46,9 @@ export interface ProjectSummary {
   project_id: string;
   title: string;
   status: string;
-  current_contract_version: number;
+  current_contract_version?: number | null;
   created_at: string;
-  active_tasks_count: number;
+  active_tasks_count?: number | null;
   pending_actions_count: number;
 }
 
@@ -121,6 +121,7 @@ export interface InvariantLedger {
   pass_count: number;
   warn_count: number;
   fail_count: number;
+  unknown_count: number;
 }
 
 export interface ActionProposal {

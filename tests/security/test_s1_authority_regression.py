@@ -386,4 +386,4 @@ def test_command_runner_rollback_fails_closed_without_compensation(tmp_path: Pat
     tool = CommandRunnerTool(workspace_root=tmp_path)
     assert tool.rollback({}) is False
     assert tool.rollback({"compensation_command": []}) is False
-    assert tool.rollback({"checkpoint": "cp_01"}) is True
+    assert tool.rollback({"checkpoint": "cp_01"}) is False

@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     )
     data_dir: Path = Field(Path("./data"), description="Base local data directory")
     journal_dir: Path = Field(Path("./data/journal"), description="Local micro-batch journal buffer")
+    canonical_event_journal_path: Path = Field(
+        Path("./data/canonical/events.jsonl"),
+        description="Fsync append-only canonical event ledger",
+    )
     evidence_dir: Path = Field(Path("./data/evidence"), description="Visual & cryptographic evidence directory")
 
     # Cost Control & Budget Ceilings

@@ -422,17 +422,19 @@ class StartupRecoveryManager:
                     canonical_source = "journal"
 
                     # First boot after upgrading a legacy SQL-only deployment:
-                    # validate the SQL history, atomically seed the empty journal,
-                    # then immediately treat the journal as canonical.
-                    if self.event_store.event_count == 0 and sql_events:
+                    # validate any SQL event history, atomically initialize the
+                    # empty journal, then import SQL-only runtime aggregates.
+                    if self.event_store.event_count == 0:
                         self.event_store.load_verified_history(
                             sql_events,
                             sql_edges,
                             initialize_journal=True,
                         )
-                        legacy_sql_migrated = True
                         legacy_runtime_migrated = (
                             await self._migrate_legacy_sql_runtime_state_to_journal(uow)
+                        )
+                        legacy_sql_migrated = bool(
+                            sql_events or any(legacy_runtime_migrated.values())
                         )
                     else:
                         self.event_store.rehydrate_from_journal()

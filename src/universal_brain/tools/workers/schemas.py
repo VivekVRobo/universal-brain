@@ -100,6 +100,7 @@ class WorkerJob(BaseModel):
 
     current_lease: Optional[WorkerLease] = None
     lease_generation: int = 0  # Fencing token counter
+    kernel_epoch: int = 1
     checkpoints: List[CheckpointRecord] = Field(default_factory=list)
     last_checkpoint_seq: int = 0
 

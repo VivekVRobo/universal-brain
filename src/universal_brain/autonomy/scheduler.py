@@ -128,6 +128,13 @@ class MissionScheduler:
     def get_mission(self, mission_id: UUID) -> Optional[Mission]:
         return self._missions.get(mission_id)
 
+    @staticmethod
+    def _apply_mission_state(target: Mission, source: Mission) -> Mission:
+        """Preserve caller-held mission identity after canonical commit succeeds."""
+        for field_name in Mission.model_fields:
+            setattr(target, field_name, getattr(source, field_name))
+        return target
+
     def assign_agent_to_task(
         self,
         mission: Mission,
@@ -238,7 +245,8 @@ class MissionScheduler:
             self._missions[mission.mission_id] = previous
             raise
 
-        self._missions[mission.mission_id] = updated
+        committed = self._apply_mission_state(mission, updated)
+        self._missions[mission.mission_id] = committed
 
     def process_due_wakeups(self, now: Optional[datetime] = None) -> int:
         due = self.wakeup_manager.get_due_wakeups(now)
@@ -286,7 +294,8 @@ class MissionScheduler:
                 self.wakeup_manager._wakeups[wakeup.wakeup_id] = previous_wakeup
                 raise
 
-            self._missions[mission.mission_id] = updated
+            committed = self._apply_mission_state(mission, updated)
+            self._missions[mission.mission_id] = committed
             fired_count += 1
 
         return fired_count

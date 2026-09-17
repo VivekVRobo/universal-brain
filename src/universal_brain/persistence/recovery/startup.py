@@ -373,6 +373,76 @@ class StartupRecoveryManager:
 
         return migrated
 
+    async def _reconcile_sql_mission_projection(
+        self,
+        uow: UnitOfWork,
+    ) -> int:
+        """Upsert current canonical mission snapshots into the SQL read index."""
+        mission_events = {
+            EventType.MISSION_CREATED,
+            EventType.MISSION_ACTIVATED,
+            EventType.MISSION_PAUSED,
+            EventType.MISSION_RESUMED,
+            EventType.MISSION_CANCELLED,
+            EventType.MISSION_COMPLETED,
+            EventType.MISSION_FAILED,
+            EventType.MISSION_WAKEUP_SCHEDULED,
+            EventType.MISSION_WAKEUP_FIRED,
+        }
+        latest: Dict[UUID, Mission] = {}
+        for event in self.event_store.get_all_events():
+            if event.event_type not in mission_events:
+                continue
+            raw = (event.payload or {}).get("mission")
+            if not isinstance(raw, dict):
+                continue
+            try:
+                mission = Mission.model_validate(raw)
+            except Exception:
+                continue
+            latest[mission.mission_id] = mission
+
+        for mission in latest.values():
+            project = await uow.projects.get_project(mission.project_id)
+            if project is None:
+                await uow.projects.create_project(
+                    mission.project_id,
+                    mission.title or f"Project {str(mission.project_id)[:8]}",
+                )
+
+            row = await uow.missions.get_mission(mission.mission_id)
+            if row is None:
+                await uow.missions.create_mission(mission)
+                continue
+
+            row.project_id = mission.project_id
+            row.title = mission.title
+            row.goal = mission.goal
+            row.description = mission.description
+            row.contract_id = mission.contract_id
+            row.contract_version = mission.contract_version
+            row.priority = mission.priority
+            row.risk_class = mission.risk_class
+            row.maximum_action_class = mission.maximum_action_class.value
+            row.maximum_autonomy_level = mission.maximum_autonomy_level.value
+            row.status = mission.status.value
+            row.created_by = mission.created_by
+            row.created_at = mission.created_at
+            row.updated_at = mission.updated_at
+            row.deadline = mission.deadline
+            row.time_horizon = mission.time_horizon
+            row.budget_ceiling = mission.budget_ceiling
+            row.budget_spent = mission.budget_spent
+            row.completion_criteria = mission.completion_criteria
+            row.failure_criteria = mission.failure_criteria
+            row.current_plan_id = mission.current_plan_id
+            row.current_plan_version = mission.current_plan_version
+            row.mission_version = mission.mission_version
+            row.kernel_epoch_created = mission.kernel_epoch_created
+
+        await uow._session.flush()
+        return len(latest)
+
     async def _rebuild_sql_worker_projection(
         self,
         uow: UnitOfWork,
@@ -396,6 +466,7 @@ class StartupRecoveryManager:
         workers_fenced = 0
         legacy_sql_migrated = False
         canonical_source = "sql-legacy"
+        mission_projection_rows = 0
         legacy_runtime_migrated = {
             "missions": 0,
             "worker_jobs": 0,
@@ -459,6 +530,9 @@ class StartupRecoveryManager:
                         uow,
                         canonical_worker_queue,
                     )
+                    mission_projection_rows = (
+                        await self._reconcile_sql_mission_projection(uow)
+                    )
                 else:
                     # Compatibility mode for tests/legacy components that have not
                     # opted into the canonical journal yet.
@@ -502,6 +576,7 @@ class StartupRecoveryManager:
             "edges_rehydrated": len(self.event_store.get_all_edges()),
             "sql_projection_events": self.event_store.event_count,
             "sql_projection_edges": len(self.event_store.get_all_edges()),
+            "sql_projection_missions": mission_projection_rows,
             "leases_fenced": leases_fenced,
             "workers_fenced": workers_fenced,
             "tasks_marked_recovery_required": tasks_recovered,

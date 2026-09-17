@@ -69,6 +69,14 @@ class ManagedServiceProcessTool(BaseTool):
             return False
         return self._stop(service_id).success
 
+    def verify_rollback(self, rollback_data: Dict[str, Any]) -> bool:
+        service_id = str(rollback_data.get("service_id", ""))
+        if not service_id:
+            return False
+        with self._lock:
+            proc = self._processes.get(service_id)
+            return proc is not None and proc.poll() is not None
+
     def _start(self, args: Dict[str, Any]) -> ToolResult:
         executable = str(args["executable"])
         arguments = [str(item) for item in args.get("arguments", [])]

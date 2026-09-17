@@ -7,6 +7,7 @@ import {
   RuntimeHealth,
 } from "../types";
 import { ApiClient } from "../services/api";
+import { OperatorAuth } from "../services/operatorAuth";
 
 interface ConsoleContextType {
   activeView: ActiveView;
@@ -64,15 +65,20 @@ export const ConsoleProvider: React.FC<{ children: React.ReactNode }> = ({ child
     return () => clearInterval(interval);
   }, [refreshState]);
 
-  // WebSocket connection with auto-reconnect
   useEffect(() => {
     let ws: WebSocket | null = null;
-    let reconnectTimeout: any = null;
+    let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+    let disposed = false;
 
     const connectWs = () => {
+      if (disposed || !OperatorAuth.getToken()) {
+        setSyncState("DISCONNECTED");
+        return;
+      }
+
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const wsUrl = `${protocol}//${window.location.host}/ws/stream`;
-      ws = new WebSocket(wsUrl);
+      const baseUrl = `${protocol}//${window.location.host}/ws/stream`;
+      ws = new WebSocket(OperatorAuth.websocketUrl(baseUrl));
 
       ws.onopen = () => {
         setSyncState("LIVE");
@@ -85,17 +91,22 @@ export const ConsoleProvider: React.FC<{ children: React.ReactNode }> = ({ child
           if (msg.type === "SNAPSHOT_REQUIRED") {
             refreshState();
           } else {
-            // New event arrived, trigger fresh pull
             refreshState();
           }
         } catch {
-          // ignore
+          // Ignore malformed/non-JSON messages; authoritative state is re-fetched.
         }
       };
 
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         setSyncState("DISCONNECTED");
-        reconnectTimeout = setTimeout(connectWs, 3000);
+        if (event.code === 4401) {
+          OperatorAuth.clear();
+          return;
+        }
+        if (!disposed && OperatorAuth.getToken()) {
+          reconnectTimeout = setTimeout(connectWs, 3000);
+        }
       };
 
       ws.onerror = () => {
@@ -104,7 +115,15 @@ export const ConsoleProvider: React.FC<{ children: React.ReactNode }> = ({ child
     };
 
     connectWs();
+    const unsubscribe = OperatorAuth.subscribe(() => {
+      if (!OperatorAuth.getToken()) {
+        ws?.close(4401, "operator authentication cleared");
+      }
+    });
+
     return () => {
+      disposed = true;
+      unsubscribe();
       if (ws) ws.close();
       if (reconnectTimeout) clearTimeout(reconnectTimeout);
     };

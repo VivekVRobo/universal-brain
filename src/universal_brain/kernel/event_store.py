@@ -1,18 +1,20 @@
 """
 Universal Brain - Event Store & Causal Graph Engine
 
-Implements ALN-016 (tamper-evident hash chain) and ALN-021 (Total Awareness).
-Provides in-memory and database-backed event storage, causal DAG linking,
-backward causal lineage tracing, and outbox micro-batching.
+The EventStore is an in-memory projection of the canonical append-only event
+ledger. When a CanonicalEventJournal is configured, every event/edge is fsync'd
+before the in-memory projection is mutated.
 """
 
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
+from universal_brain.kernel.canonical_journal import CanonicalEventJournal
 from universal_brain.kernel.errors import HashChainTamperError
 from universal_brain.kernel.events import (
     EventEdge,
@@ -23,27 +25,106 @@ from universal_brain.kernel.events import (
 
 
 class EventStore:
-    """
-    Core transactional event store and causal graph manager.
-    Maintains cryptographic hash-chain continuity and directed causal edges.
-    """
+    """Tamper-evident canonical event projection with optional durable journal."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        journal: CanonicalEventJournal | None = None,
+        *,
+        rehydrate: bool = True,
+    ) -> None:
         self._events: List[EventEnvelope] = []
         self._events_by_id: Dict[UUID, EventEnvelope] = {}
         self._edges: List[EventEdge] = []
         self._outbox: List[EventEnvelope] = []
         self._latest_hash: str = ""
+        self._journal = journal
+
+        if self._journal is not None and rehydrate:
+            self.rehydrate_from_journal()
+
+    @classmethod
+    def durable(cls, journal_path: Path, *, rehydrate: bool = True) -> "EventStore":
+        """Create an EventStore backed by the canonical fsync journal."""
+        return cls(CanonicalEventJournal(journal_path), rehydrate=rehydrate)
+
+    @property
+    def journal(self) -> CanonicalEventJournal | None:
+        return self._journal
+
+    @property
+    def is_durable(self) -> bool:
+        return self._journal is not None
 
     @property
     def latest_hash(self) -> str:
-        """Returns the SHA-256 hash of the most recent event in the chain."""
         return self._latest_hash
 
     @property
     def event_count(self) -> int:
-        """Returns the total number of events recorded."""
         return len(self._events)
+
+    def _reset_projection(self) -> None:
+        self._events.clear()
+        self._events_by_id.clear()
+        self._edges.clear()
+        self._outbox.clear()
+        self._latest_hash = ""
+
+    def _project_event(
+        self,
+        event: EventEnvelope,
+        causal_edge: EventEdge | None = None,
+        *,
+        enqueue_outbox: bool = True,
+    ) -> None:
+        if event.event_id in self._events_by_id:
+            raise ValueError(f"Duplicate event id {event.event_id} in canonical projection.")
+        if event.prev_event_hash != self._latest_hash:
+            raise HashChainTamperError(
+                f"Canonical event {event.event_id} does not extend current chain head."
+            )
+
+        self._events.append(event)
+        self._events_by_id[event.event_id] = event
+        self._latest_hash = event.event_hash
+        if enqueue_outbox:
+            self._outbox.append(event)
+
+        if causal_edge is not None:
+            self._project_edge(causal_edge)
+
+    def _project_edge(self, edge: EventEdge) -> None:
+        if edge.source_event_id not in self._events_by_id:
+            raise ValueError(f"Source event {edge.source_event_id} not found in store.")
+        if edge.target_event_id not in self._events_by_id:
+            raise ValueError(f"Target event {edge.target_event_id} not found in store.")
+        if any(existing.edge_id == edge.edge_id for existing in self._edges):
+            raise ValueError(f"Duplicate edge id {edge.edge_id} in canonical projection.")
+        self._edges.append(edge)
+
+    def rehydrate_from_journal(self) -> int:
+        """Rebuild the entire in-memory projection deterministically from the journal."""
+        if self._journal is None:
+            raise RuntimeError("EventStore has no canonical journal configured.")
+
+        records = self._journal.load_records()
+        self._reset_projection()
+
+        for index, record in enumerate(records, start=1):
+            kind = record["kind"]
+            if kind == "event":
+                event = EventEnvelope.model_validate(record["event"])
+                raw_edge = record.get("causal_edge")
+                edge = EventEdge.model_validate(raw_edge) if raw_edge else None
+                self._project_event(event, causal_edge=edge, enqueue_outbox=False)
+            elif kind == "edge":
+                self._project_edge(EventEdge.model_validate(record["edge"]))
+            else:
+                raise ValueError(f"Unsupported canonical journal record {index}: {kind}")
+
+        self.verify_chain_integrity()
+        return self.event_count
 
     def append_event(
         self,
@@ -56,11 +137,10 @@ class EventStore:
         caused_by_event_id: Optional[UUID] = None,
         timestamp: Optional[datetime] = None,
     ) -> EventEnvelope:
-        """
-        Atomically append an event to the ledger, compute its SHA-256 hash
-        linked to the predecessor, and optionally create a CAUSED_BY causal edge.
-        """
-        # Create event with current chain head as prev_event_hash
+        """Append one canonical event, durable-before-visible when journaled."""
+        if caused_by_event_id and caused_by_event_id not in self._events_by_id:
+            raise ValueError(f"Caused-by event {caused_by_event_id} does not exist in store.")
+
         event = EventEnvelope.create(
             event_type=event_type,
             actor_id=actor_id,
@@ -72,22 +152,19 @@ class EventStore:
             timestamp=timestamp,
         )
 
-        # Store event
-        self._events.append(event)
-        self._events_by_id[event.event_id] = event
-        self._outbox.append(event)
-        self._latest_hash = event.event_hash
-
-        # Link causal edge if cause specified
+        causal_edge = None
         if caused_by_event_id:
-            if caused_by_event_id not in self._events_by_id:
-                raise ValueError(f"Caused-by event {caused_by_event_id} does not exist in store.")
-            self.add_edge(
+            causal_edge = EventEdge(
                 source_event_id=caused_by_event_id,
                 target_event_id=event.event_id,
                 relation_type=RelationType.CAUSED_BY,
             )
 
+        # Durability is the commit point. RAM is only updated after fsync succeeds.
+        if self._journal is not None:
+            self._journal.append_event(event, causal_edge)
+
+        self._project_event(event, causal_edge=causal_edge)
         return event
 
     def add_edge(
@@ -96,7 +173,7 @@ class EventStore:
         target_event_id: UUID,
         relation_type: RelationType,
     ) -> EventEdge:
-        """Record a directed relationship between two events (e.g., PROVES, INVALIDATES)."""
+        """Record a causal relationship, durable-before-visible when journaled."""
         if source_event_id not in self._events_by_id:
             raise ValueError(f"Source event {source_event_id} not found in store.")
         if target_event_id not in self._events_by_id:
@@ -107,22 +184,21 @@ class EventStore:
             target_event_id=target_event_id,
             relation_type=relation_type,
         )
-        self._edges.append(edge)
+        if self._journal is not None:
+            self._journal.append_edge(edge)
+        self._project_edge(edge)
         return edge
 
     def get_event(self, event_id: UUID) -> Optional[EventEnvelope]:
-        """Fetch a specific event by UUID."""
         return self._events_by_id.get(event_id)
 
     def get_all_events(self) -> List[EventEnvelope]:
-        """Return all recorded events in chronological order."""
         return list(self._events)
 
+    def get_all_edges(self) -> List[EventEdge]:
+        return list(self._edges)
+
     def verify_chain_integrity(self) -> bool:
-        """
-        Traverse the full event ledger and assert cryptographic hash-chain validity (ALN-016).
-        Raises HashChainTamperError if any hash mismatch or broken chain is discovered.
-        """
         expected_prev_hash = ""
         for idx, event in enumerate(self._events):
             if event.prev_event_hash != expected_prev_hash:
@@ -137,17 +213,11 @@ class EventStore:
                     f"Tampered event payload at index {idx} (Event ID: {event.event_id}): "
                     f"stored hash '{event.event_hash}', recomputed '{recomputed_hash}'."
                 )
-
             expected_prev_hash = event.event_hash
 
         return True
 
     def trace_causal_lineage(self, event_id: UUID, max_depth: int = 25) -> List[EventEnvelope]:
-        """
-        Perform a backward causal walk along CAUSED_BY edges.
-        Answers the question: 'Why did this event happen?'
-        Returns the path in reverse causal order (originating cause first).
-        """
         lineage: List[EventEnvelope] = []
         current_id: Optional[UUID] = event_id
         depth = 0
@@ -158,29 +228,25 @@ class EventStore:
                 break
             lineage.append(event)
             depth += 1
-
-            # Find incoming CAUSED_BY edge where target == current_id
             parent_edge = next(
-                (e for e in self._edges if e.target_event_id == current_id and e.relation_type == RelationType.CAUSED_BY),
+                (
+                    edge
+                    for edge in self._edges
+                    if edge.target_event_id == current_id
+                    and edge.relation_type == RelationType.CAUSED_BY
+                ),
                 None,
             )
             current_id = parent_edge.source_event_id if parent_edge else None
 
-        # Return root cause first (e.g. USER_INPUT -> INTENT_PARSED -> CONTRACT -> TASK -> TOOL)
         lineage.reverse()
         return lineage
 
     def drain_outbox(self, max_batch_size: int = 100) -> List[EventEnvelope]:
-        """
-        Drain events from the replication outbox buffer for micro-batch chunk creation.
-        Satisfies the 60s micro-batch upload requirement in MEMORY_ARCHITECTURE.md.
-        """
         batch = self._outbox[:max_batch_size]
         self._outbox = self._outbox[max_batch_size:]
         return batch
 
     def export_outbox_jsonl(self, max_batch_size: int = 100) -> str:
-        """Formats the drained outbox batch into newline-delimited JSON (JSONL)."""
         events = self.drain_outbox(max_batch_size)
-        lines = [e.to_canonical_json() for e in events]
-        return "\n".join(lines)
+        return "\n".join(event.to_canonical_json() for event in events)

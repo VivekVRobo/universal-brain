@@ -30,6 +30,7 @@ from universal_brain.api.read_models import (
     evaluate_runtime_invariants,
     latest_active_contract,
     latest_model_identity,
+    latest_mission,
     observed_contract_version,
     project_observations,
 )
@@ -87,7 +88,7 @@ async def get_runtime_health(container: RuntimeContainer = Depends(get_container
 
     # A production/staging process without materialized persistence must not
     # advertise itself as fully LIVE.
-    if settings.app_env in {"production", "staging"} and not container.persistence_initialized:
+    if settings.app_env in {"production", "staging"} and not container.canonical_state_ready:
         if node_status == "HEALTHY":
             node_status = "DEGRADED"
 
@@ -96,7 +97,7 @@ async def get_runtime_health(container: RuntimeContainer = Depends(get_container
         if p.status == ActionStatus.AWAITING_APPROVAL
     ])
 
-    is_live = settings.app_env == "production" and container.persistence_initialized
+    is_live = settings.app_env == "production" and container.canonical_state_ready
     return RuntimeHealthResponse(
         node_id=settings.system_id,
         status=node_status,
@@ -780,7 +781,7 @@ async def get_worker_job(
     container: RuntimeContainer = Depends(get_container),
 ) -> Dict[str, Any]:
     """Queries current state of a worker job."""
-    job = container.job_queue._jobs.get(job_id)
+    job = container.job_queue.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Worker job not found.")
     return {

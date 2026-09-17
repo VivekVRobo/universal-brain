@@ -144,6 +144,7 @@ def test_mission_scheduler_reconstructs_mission_agent_lease_and_wakeup(tmp_path:
         status=MissionStatus.READY,
     )
     scheduler.register_mission(mission)
+    initial_mission_version = mission.mission_version
 
     task_id = uuid4()
     lease = scheduler.assign_agent_to_task(
@@ -165,7 +166,7 @@ def test_mission_scheduler_reconstructs_mission_agent_lease_and_wakeup(tmp_path:
 
     assert restored_mission is not None
     assert restored_mission.status == MissionStatus.WAITING_EXTERNAL
-    assert restored_mission.mission_version == mission.mission_version + 1
+    assert restored_mission.mission_version == initial_mission_version + 1
     assert restarted._task_generations[task_id] == 1
     assert lease.lease_id in restarted.lease_controller._leases
     assert len(restarted._agents) == 1

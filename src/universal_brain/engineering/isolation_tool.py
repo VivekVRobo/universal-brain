@@ -42,11 +42,13 @@ class IsolationPlanExecutionTool(BaseTool):
         *,
         allowed_wsl_distros: set[str] | None = None,
         allowed_hyperv_vms: set[str] | None = None,
+        hyperv_attestation_verifier: Callable[[IsolationCommandPlan], set[str] | list[str] | tuple[str, ...] | None] | None = None,
         output_limit_bytes: int = 500_000,
     ) -> None:
         self.workspace_root = workspace_root.resolve()
         self.allowed_wsl_distros = {item.strip() for item in (allowed_wsl_distros or set()) if item.strip()}
         self.allowed_hyperv_vms = {item.strip() for item in (allowed_hyperv_vms or set()) if item.strip()}
+        self.hyperv_attestation_verifier = hyperv_attestation_verifier
         self.output_limit_bytes = max(4096, int(output_limit_bytes))
         self._plans: dict[str, IsolationCommandPlan] = {}
 
@@ -78,7 +80,7 @@ class IsolationPlanExecutionTool(BaseTool):
                 reversibility_class=self.reversibility_class,
             )
         try:
-            self._validate_plan(plan)
+            verified_controls = self._validate_plan(plan)
         except (IsolationError, ValueError) as exc:
             return ToolResult(
                 success=False,
@@ -127,7 +129,8 @@ class IsolationPlanExecutionTool(BaseTool):
             error_message=("isolated command timed out" if timed_out else None if success else "isolated command failed"),
             evidence={
                 "isolation_provider": plan.provider,
-                "enforced_controls": list(plan.enforced_controls),
+                "enforced_controls": sorted(verified_controls),
+                "verified_controls": sorted(verified_controls),
                 "network_mode": plan.quota.network_mode.value,
                 "exit_code": exit_code,
                 "timed_out": timed_out,
@@ -145,19 +148,11 @@ class IsolationPlanExecutionTool(BaseTool):
         # rollback remains the responsibility of Git/checkpoint transactions.
         return False
 
-    def _validate_plan(self, plan: IsolationCommandPlan) -> None:
+    def _validate_plan(self, plan: IsolationCommandPlan) -> set[str]:
         root = plan.workspace_root.resolve()
         if root != self.workspace_root:
             raise IsolationError("isolation plan workspace does not match configured workspace")
         confine_path(plan.host_cwd.resolve(), self.workspace_root)
-        controls = set(plan.enforced_controls)
-        required = {"memory", "cpu", "pids", "wall-timeout"}
-        if not required.issubset(controls):
-            raise IsolationError(f"isolation plan is missing required controls: {sorted(required - controls)}")
-        if plan.quota.network_mode == NetworkMode.DENY and not ({"network-deny", "network-policy"} & controls):
-            raise IsolationError("network-deny plan lacks attested network enforcement evidence")
-        if plan.quota.network_mode == NetworkMode.ALLOWLIST and "network-allowlist" not in controls and "network-policy" not in controls:
-            raise IsolationError("network allowlist plan lacks allowlist enforcement evidence")
 
         executable = Path(plan.host_executable).name.lower()
         if plan.provider == "wsl2":
@@ -172,7 +167,9 @@ class IsolationPlanExecutionTool(BaseTool):
                 raise IsolationError("WSL2 plan is missing an explicit distribution") from exc
             if distro not in self.allowed_wsl_distros:
                 raise IsolationError(f"WSL2 distro is not authorized: {distro}")
-        elif plan.provider == "hyperv":
+            return self._derive_wsl_verified_controls(plan)
+
+        if plan.provider == "hyperv":
             if executable not in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
                 raise IsolationError("Hyper-V plan must execute through PowerShell")
             if not self.allowed_hyperv_vms:
@@ -180,8 +177,77 @@ class IsolationPlanExecutionTool(BaseTool):
             command_text = " ".join(plan.host_arguments)
             if not any(vm in command_text for vm in self.allowed_hyperv_vms):
                 raise IsolationError("Hyper-V plan does not target an authorized VM")
-        else:
-            raise IsolationError(f"unsupported isolation provider: {plan.provider}")
+            return self._derive_hyperv_verified_controls(plan)
+
+        raise IsolationError(f"unsupported isolation provider: {plan.provider}")
+
+    def _derive_wsl_verified_controls(self, plan: IsolationCommandPlan) -> set[str]:
+        """Derive enforcement proof from the actual WSL argv, never plan labels."""
+        args = list(plan.host_arguments)
+        required_properties = {
+            f"MemoryMax={plan.quota.memory_mb}M": "memory",
+            f"CPUQuota={plan.quota.cpu_percent}%": "cpu",
+            f"TasksMax={plan.quota.pids_max}": "pids",
+        }
+        verified: set[str] = set()
+        for property_arg, control in required_properties.items():
+            if property_arg not in args:
+                raise IsolationError(
+                    f"WSL2 plan does not encode required {control} control: {property_arg}"
+                )
+            verified.add(control)
+
+        try:
+            workdir_index = args.index("--working-directory")
+            linux_workdir = args[workdir_index + 1]
+        except (ValueError, IndexError) as exc:
+            raise IsolationError("WSL2 plan lacks an explicit guest working directory") from exc
+        if not str(linux_workdir).startswith("/"):
+            raise IsolationError("WSL2 guest working directory must be absolute")
+
+        if plan.quota.network_mode == NetworkMode.DENY:
+            unshare_indexes = [
+                index
+                for index, item in enumerate(args)
+                if Path(str(item)).name.lower() == "unshare"
+            ]
+            if not unshare_indexes:
+                raise IsolationError("WSL2 network-deny plan does not invoke unshare")
+            if not any(
+                "--net" in args[index + 1 : index + 4]
+                for index in unshare_indexes
+            ):
+                raise IsolationError("WSL2 network-deny plan does not create a network namespace")
+            verified.add("network-deny")
+        elif plan.quota.network_mode == NetworkMode.ALLOWLIST:
+            raise IsolationError(
+                "WSL2 network allowlist execution is disabled until a real egress guard is configured"
+            )
+
+        # The executor enforces this independently with communicate(timeout=...).
+        verified.add("wall-timeout")
+        return verified
+
+    def _derive_hyperv_verified_controls(self, plan: IsolationCommandPlan) -> set[str]:
+        """Require deployment-owned live attestation for Hyper-V policy controls."""
+        if self.hyperv_attestation_verifier is None:
+            raise IsolationError(
+                "Hyper-V execution requires a runtime policy attestation verifier"
+            )
+        attested = self.hyperv_attestation_verifier(plan)
+        verified = {str(item) for item in (attested or []) if str(item)}
+        required = {"memory", "cpu", "pids", "wall-timeout"}
+        if plan.quota.network_mode == NetworkMode.DENY:
+            required.add("network-deny")
+        elif plan.quota.network_mode == NetworkMode.ALLOWLIST:
+            required.add("network-allowlist")
+        missing = sorted(required - verified)
+        if missing:
+            raise IsolationError(
+                "Hyper-V runtime attestation is missing required controls: "
+                + ", ".join(missing)
+            )
+        return verified
 
 
 class ToolGatewayIsolationBackend:

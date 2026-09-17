@@ -65,5 +65,14 @@ class BaseTool(ABC):
 
     @abstractmethod
     def rollback(self, rollback_data: Dict[str, Any]) -> bool:
-        """Reverses the effect of an A1 action using recorded rollback data."""
+        """Attempt to reverse the effect of an A1 action using recorded rollback data."""
         pass
+
+    def verify_rollback(self, rollback_data: Dict[str, Any]) -> bool:
+        """Independently verify the rollback postcondition.
+
+        Returning True from rollback is never sufficient proof on its own.
+        Tools that support authoritative rollback must override this method and
+        inspect the resulting state. The default is deliberately fail-closed.
+        """
+        return False

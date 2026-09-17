@@ -1,8 +1,8 @@
 """
 Universal Brain - FastAPI Application Factory
 
-Configures CORS, mounts REST routers, WebSocket streaming endpoints,
-and initializes baseline singleton domain state.
+Configures CORS, authenticated control-plane boundaries, REST routers,
+WebSocket streaming endpoints, and baseline singleton domain state.
 """
 
 from __future__ import annotations
@@ -13,21 +13,35 @@ from datetime import datetime, timezone
 from typing import AsyncGenerator
 from uuid import UUID
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from universal_brain.api.actions import ActionStatus
+from universal_brain.api.auth import (
+    authenticate_operator_request,
+    authenticate_operator_token,
+    websocket_operator_token,
+)
 from universal_brain.api.dependencies import get_container
 from universal_brain.api.router import router as api_v1_router
 from universal_brain.config import settings
 from universal_brain.kernel.events import ActionClass, EventType
 
 
+# Worker execution endpoints carry their own scoped worker bearer tokens. Worker
+# registration and all operator/query endpoints remain behind operator auth.
+_WORKER_AUTH_EXEMPT_PATHS = {
+    "/api/v1/workers/poll",
+    "/api/v1/workers/progress",
+    "/api/v1/workers/complete",
+}
+
+
 def preseed_baseline_domain_state() -> None:
     """Pre-seeds realistic domain state into the runtime singletons."""
     container = get_container()
 
-    # 1. Preseed Event Chain in EventStore if empty
     if container.event_store.event_count == 0:
         p_id = UUID("00000000-0000-0000-0000-000000000001")
         t_id = UUID("00000000-0000-0000-0000-000000000002")
@@ -38,7 +52,6 @@ def preseed_baseline_domain_state() -> None:
             payload={"utterance": "Design and deploy a verified ROS 2 Humble PID controller for humanoid balance."},
             project_id=p_id,
         )
-
         e2 = container.event_store.append_event(
             event_type=EventType.INTENT_PARSED,
             actor_id="executive_kernel",
@@ -50,7 +63,6 @@ def preseed_baseline_domain_state() -> None:
             project_id=p_id,
             caused_by_event_id=e1.event_id,
         )
-
         e3 = container.event_store.append_event(
             event_type=EventType.CONTRACT_CREATED,
             actor_id="alignment_engine",
@@ -58,7 +70,6 @@ def preseed_baseline_domain_state() -> None:
             project_id=p_id,
             caused_by_event_id=e2.event_id,
         )
-
         e4 = container.event_store.append_event(
             event_type=EventType.TASK_ASSIGNED,
             actor_id="executive_router",
@@ -67,7 +78,6 @@ def preseed_baseline_domain_state() -> None:
             task_id=t_id,
             caused_by_event_id=e3.event_id,
         )
-
         e5 = container.event_store.append_event(
             event_type=EventType.TOOL_CALLED,
             actor_id="RoboticsCoder",
@@ -76,7 +86,6 @@ def preseed_baseline_domain_state() -> None:
             task_id=t_id,
             caused_by_event_id=e4.event_id,
         )
-
         container.event_store.append_event(
             event_type=EventType.EVIDENCE_PRODUCED,
             actor_id="tool_gateway",
@@ -90,7 +99,6 @@ def preseed_baseline_domain_state() -> None:
             caused_by_event_id=e5.event_id,
         )
 
-    # 2. Preseed a pending A2 consequential proposal if none exist
     if not container.action_manager.list_proposals():
         container.action_manager.create_proposal(
             project_id=UUID("00000000-0000-0000-0000-000000000001"),
@@ -112,20 +120,17 @@ def preseed_baseline_domain_state() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Startup and shutdown lifecycle."""
     preseed_baseline_domain_state()
     yield
 
 
 def create_app() -> FastAPI:
-    """Build and configure the FastAPI application."""
     app = FastAPI(
         title="Universal Brain Sovereign Control Plane API",
         version="0.1.0",
         lifespan=lifespan,
     )
 
-    # CORS configuration for local-first console
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000"],
@@ -134,12 +139,31 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Mount REST routes
+    @app.middleware("http")
+    async def operator_auth_boundary(request: Request, call_next):
+        path = request.url.path.rstrip("/") or "/"
+        if path.startswith("/api/v1") and path not in _WORKER_AUTH_EXEMPT_PATHS:
+            try:
+                request.state.operator_principal = authenticate_operator_request(request)
+            except HTTPException as exc:
+                return JSONResponse(
+                    status_code=exc.status_code,
+                    content={"detail": exc.detail},
+                    headers=exc.headers or {},
+                )
+        return await call_next(request)
+
     app.include_router(api_v1_router)
 
-    # WebSocket Realtime Endpoint
     @app.websocket("/ws/stream")
     async def websocket_stream(websocket: WebSocket) -> None:
+        try:
+            principal = authenticate_operator_token(websocket_operator_token(websocket))
+        except HTTPException:
+            await websocket.close(code=4401, reason="operator authentication required")
+            return
+
+        websocket.state.operator_principal = principal
         container = get_container()
         await container.ws_gateway.connect(websocket)
         try:
@@ -157,7 +181,9 @@ def create_app() -> FastAPI:
                             for envelope in replay:
                                 await websocket.send_text(envelope.model_dump_json())
                     elif action == "ping":
-                        await websocket.send_text(json.dumps({"type": "PONG", "timestamp": datetime.now(timezone.utc).isoformat()}))
+                        await websocket.send_text(
+                            json.dumps({"type": "PONG", "timestamp": datetime.now(timezone.utc).isoformat()})
+                        )
                 except Exception:
                     pass
         except WebSocketDisconnect:

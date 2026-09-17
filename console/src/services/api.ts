@@ -110,6 +110,7 @@ export class ApiClient {
     operator_id: string;
     authorization_digest: string;
     nonce: string;
+    approved_at: string;
   }): Promise<any> {
     const res = await authenticatedFetch(`${API_BASE}/actions/${params.action_id}/approve`, {
       method: "POST",

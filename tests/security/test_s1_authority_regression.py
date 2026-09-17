@@ -88,8 +88,7 @@ def mock_contract() -> AlignmentContract:
         acceptance_criteria=[crit],
         original_inputs=[inp],
     )
-    contract.activate()
-    return contract
+    return contract.activate()
 
 
 # -----------------------------------------------------------------------------
@@ -110,7 +109,6 @@ def test_argument_target_tampering_rejected_by_request_bound_token(tmp_path: Pat
     gateway = ToolGateway(event_store=event_store, capability_service=cap_service)
     gateway.register_tool(tool)
 
-    # Attacker obtains token for 'authorized.txt'
     token = cap_service.issue_token(
         project_id=project_id,
         task_id=task_id,
@@ -123,7 +121,6 @@ def test_argument_target_tampering_rejected_by_request_bound_token(tmp_path: Pat
     unauthorized_file = tmp_path / "unauthorized.txt"
     assert not unauthorized_file.exists()
 
-    # Attacker attempts to pass target_resource='authorized.txt' to gateway but args pointing to 'unauthorized.txt'
     with pytest.raises(CapabilityDeniedError):
         gateway.execute_tool(
             tool_name="write_file",
@@ -133,15 +130,11 @@ def test_argument_target_tampering_rejected_by_request_bound_token(tmp_path: Pat
             target_resource="authorized.txt",
         )
 
-    # Assert unauthorized file was never written
     assert not unauthorized_file.exists()
 
 
 def test_request_digest_tampering_rejected(tmp_path: Path, mock_contract: AlignmentContract, project_id: UUID):
-    """
-    Ensures that when a capability token is bound to a specific request digest,
-    any argument mutation invalidates the token.
-    """
+    """Any argument mutation invalidates a request-bound token."""
     task_id = uuid4()
     tx_manager = WorkspaceTransactionManager(workspace_root=tmp_path, project_id=project_id, task_id=task_id)
     tool = FileWriteTool(tx_manager)
@@ -149,8 +142,6 @@ def test_request_digest_tampering_rejected(tmp_path: Path, mock_contract: Alignm
     event_store = EventStore()
     gateway = ToolGateway(event_store=event_store, capability_service=cap_service)
     gateway.register_tool(tool)
-
-    cap_service = CapabilityService()
 
     canonical_args = {"target": "safe.txt", "content": "original content"}
     request_digest = compute_canonical_request_digest(
@@ -171,9 +162,7 @@ def test_request_digest_tampering_rejected(tmp_path: Path, mock_contract: Alignm
         request_digest=request_digest,
     )
 
-    # Tampered argument payload
     tampered_args = {"target": "safe.txt", "content": "TAMPERED payload"}
-
     with pytest.raises(CapabilityDeniedError, match="request digest mismatch"):
         gateway.execute_tool(
             tool_name="write_file",
@@ -188,23 +177,15 @@ def test_request_digest_tampering_rejected(tmp_path: Path, mock_contract: Alignm
 # -----------------------------------------------------------------------------
 
 def test_resource_matching_rejects_prefix_collision_safeevil():
-    """
-    Reproduces audit exploit:
-    'safe*' must NOT match 'safeevil'.
-    'safe/*' must match 'safe/file.txt' but NOT 'safeevil'.
-    """
-    # Boundary check function
     assert not is_resource_authorized("safe*", "safeevil")
     assert not is_resource_authorized("safe/*", "safeevil")
     assert is_resource_authorized("safe/*", "safe/file.txt")
     assert is_resource_authorized("safe", "safe")
     assert is_resource_authorized("*", "anything")
 
-    # CapabilityService verification check
     cap_service = CapabilityService()
     task_id = uuid4()
     proj_id = uuid4()
-
     token = cap_service.issue_token(
         project_id=proj_id,
         task_id=task_id,
@@ -214,7 +195,6 @@ def test_resource_matching_rejects_prefix_collision_safeevil():
         allowed_operations=["read"],
     )
 
-    # Verify attempt with 'safeevil' must fail closed
     with pytest.raises(CapabilityDeniedError, match="outside authorized scope"):
         cap_service.verify_token(
             token=token,
@@ -229,14 +209,9 @@ def test_resource_matching_rejects_prefix_collision_safeevil():
 # -----------------------------------------------------------------------------
 
 def test_unauthenticated_worker_progress_and_completion_rejected():
-    """
-    Reproduces audit exploit:
-    Calling worker progress or complete without Authorization Bearer header must fail with HTTP 401.
-    """
     client = TestClient(app)
     job_id = str(uuid4())
 
-    # 1. Progress without header
     res = client.post(
         "/api/v1/workers/progress",
         json={
@@ -250,7 +225,6 @@ def test_unauthenticated_worker_progress_and_completion_rejected():
     assert res.status_code == 401
     assert "Missing or invalid Authorization Bearer header" in res.json()["detail"]
 
-    # 2. Complete without header
     res = client.post(
         "/api/v1/workers/complete",
         json={
@@ -269,10 +243,6 @@ def test_unauthenticated_worker_progress_and_completion_rejected():
 # -----------------------------------------------------------------------------
 
 def test_worker_lease_token_mismatch_rejected():
-    """
-    Verifies that a job lease token bound to worker_A and job_1 cannot be used
-    by worker_B or on job_2 or with a stale lease generation.
-    """
     auth = WorkerAuthService()
     session_id = str(uuid4())
     job_1 = str(uuid4())
@@ -286,7 +256,6 @@ def test_worker_lease_token_mismatch_rejected():
         kernel_epoch=1,
     )
 
-    # 1. Valid verification succeeds
     claims = auth.verify_job_lease_token(
         token=token,
         expected_worker_id="worker_A",
@@ -297,7 +266,6 @@ def test_worker_lease_token_mismatch_rejected():
     )
     assert claims["worker_id"] == "worker_A"
 
-    # 2. Worker mismatch
     with pytest.raises(CapabilityDeniedError, match="attempted use by 'worker_B'"):
         auth.verify_job_lease_token(
             token=token,
@@ -306,7 +274,6 @@ def test_worker_lease_token_mismatch_rejected():
             expected_lease_generation=1,
         )
 
-    # 3. Job ID mismatch
     with pytest.raises(CapabilityDeniedError, match="attempted use on job"):
         auth.verify_job_lease_token(
             token=token,
@@ -315,7 +282,6 @@ def test_worker_lease_token_mismatch_rejected():
             expected_lease_generation=1,
         )
 
-    # 4. Lease generation mismatch
     with pytest.raises(CapabilityDeniedError, match="does not match active generation"):
         auth.verify_job_lease_token(
             token=token,
@@ -324,7 +290,6 @@ def test_worker_lease_token_mismatch_rejected():
             expected_lease_generation=2,
         )
 
-    # 5. Kernel epoch mismatch
     with pytest.raises(CapabilityDeniedError, match="is stale; current kernel epoch is 2"):
         auth.verify_job_lease_token(
             token=token,
@@ -340,11 +305,6 @@ def test_worker_lease_token_mismatch_rejected():
 # -----------------------------------------------------------------------------
 
 def test_forged_expired_wrong_scope_rollback_token_rejected(tmp_path: Path, mock_contract: AlignmentContract, project_id: UUID):
-    """
-    Reproduces audit exploit:
-    ToolGateway.rollback_tool receives forged/expired/wrong-scope token.
-    Must verify token and reject before calling tool rollback.
-    """
     tx_manager = WorkspaceTransactionManager(workspace_root=tmp_path, project_id=project_id, task_id=uuid4())
     tool = FileWriteTool(tx_manager)
     cap_service = CapabilityService()
@@ -352,11 +312,9 @@ def test_forged_expired_wrong_scope_rollback_token_rejected(tmp_path: Path, mock
     gateway = ToolGateway(event_store=event_store, capability_service=cap_service)
     gateway.register_tool(tool)
 
-    # Write a test file
     test_file = tmp_path / "important.txt"
     test_file.write_text("pre-mutation state", encoding="utf-8")
 
-    # Create a forged capability token with bad signature
     forged_token = CapabilityToken(
         token_id=uuid4(),
         project_id=uuid4(),
@@ -378,7 +336,6 @@ def test_forged_expired_wrong_scope_rollback_token_rejected(tmp_path: Path, mock
             contract=mock_contract,
         )
 
-    # Verify file is still intact
     assert test_file.read_text(encoding="utf-8") == "pre-mutation state"
 
 
@@ -387,10 +344,6 @@ def test_forged_expired_wrong_scope_rollback_token_rejected(tmp_path: Path, mock
 # -----------------------------------------------------------------------------
 
 def test_a2_endpoints_return_forbidden_under_stabilization_lockdown():
-    """
-    Enforces Gate S1 policy: A2 approval and rollback API endpoints
-    must return HTTP 403 Forbidden under stabilization lockdown.
-    """
     client = TestClient(app)
     cnt = get_container()
     now = datetime.now(timezone.utc)
@@ -412,8 +365,6 @@ def test_a2_endpoints_return_forbidden_under_stabilization_lockdown():
     )
 
     valid_digest = proposal.compute_authorization_digest("operator-vivek", now)
-
-    # 1. A2 Approve is locked down
     res = client.post(
         f"/api/v1/actions/{proposal.action_id}/approve",
         json={
@@ -428,7 +379,6 @@ def test_a2_endpoints_return_forbidden_under_stabilization_lockdown():
     assert res.status_code == 403
     assert "A2_LOCKED_PENDING_OPERATOR_AUTH" in res.json()["detail"]
 
-    # 2. A2 Rollback is locked down
     proposal.status = ActionStatus.SUCCEEDED
     res_rb = client.post(
         f"/api/v1/actions/{proposal.action_id}/rollback",
@@ -447,19 +397,9 @@ def test_a2_endpoints_return_forbidden_under_stabilization_lockdown():
 # -----------------------------------------------------------------------------
 
 def test_unrecognized_ambiguity_strictly_defaults_to_medium():
-    """
-    Reproduces audit exploit:
-    AmbiguityClassifier previously returned LOW for unrecognized questions.
-    Must now strictly return MEDIUM, while returning LOW only for explicit LOW_PATTERNS.
-    """
-    # 1. Unrecognized ambiguity -> must be MEDIUM
     assert AmbiguityClassifier.classify("What color theme should we use?") == AmbiguityImpact.MEDIUM
     assert AmbiguityClassifier.classify("Should we add extra logging?") == AmbiguityImpact.MEDIUM
-
-    # 2. Explicit High patterns
     assert AmbiguityClassifier.classify("delete production database") == AmbiguityImpact.HIGH
-
-    # 3. Explicit Low patterns
     assert AmbiguityClassifier.classify("fix variable_name typo") == AmbiguityImpact.LOW
     assert AmbiguityClassifier.classify("clean up whitespace and comment") == AmbiguityImpact.LOW
 
@@ -469,11 +409,6 @@ def test_unrecognized_ambiguity_strictly_defaults_to_medium():
 # -----------------------------------------------------------------------------
 
 def test_production_environment_rejects_development_secrets():
-    """
-    Reproduces audit finding:
-    Default development HMAC key and DB password must fail closed in production/staging.
-    """
-    # 1. Production with dev HMAC key -> must raise ValueError
     with pytest.raises(ValueError, match="FATAL: In 'production' mode, hmac_secret_key must be an externally configured secret"):
         Settings(
             app_env="production",
@@ -481,7 +416,6 @@ def test_production_environment_rejects_development_secrets():
             database_url="postgresql+asyncpg://admin:secure_pass@localhost:5432/brain",
         )
 
-    # 2. Staging with dev DB password -> must raise ValueError
     with pytest.raises(ValueError, match="database_url must not contain default development credentials"):
         Settings(
             app_env="staging",
@@ -489,7 +423,6 @@ def test_production_environment_rejects_development_secrets():
             database_url="postgresql+asyncpg://admin:brain_dev_password@localhost:5432/brain",
         )
 
-    # 3. Valid production settings -> succeeds
     prod = Settings(
         app_env="production",
         hmac_secret_key="a_very_secure_production_secret_key_1234567890",
@@ -503,17 +436,7 @@ def test_production_environment_rejects_development_secrets():
 # -----------------------------------------------------------------------------
 
 def test_command_runner_rollback_fails_closed_without_compensation(tmp_path: Path):
-    """
-    CommandRunnerTool previously returned True from rollback unconditionally.
-    Must now fail closed (return False) unless verified compensation succeeds.
-    """
     tool = CommandRunnerTool(workspace_root=tmp_path)
-
-    # Empty rollback data -> must return False
     assert tool.rollback({}) is False
-
-    # Invalid compensation command -> must return False
     assert tool.rollback({"compensation_command": []}) is False
-
-    # Checkpoint rollback -> returns True (handled via workspace)
     assert tool.rollback({"checkpoint": "cp_01"}) is True

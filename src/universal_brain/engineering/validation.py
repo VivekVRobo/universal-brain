@@ -646,6 +646,7 @@ class V53AuthorityServiceScenario:
             return cap_service.issue_token(
                 project_id=project_id,
                 task_id=uuid4(),
+                contract_id=contract.contract_id,
                 contract_version=contract.version,
                 action_class=ActionClass.A1,
                 target_resource=str(self.workspace),
@@ -750,17 +751,11 @@ class V53AuthorityServiceScenario:
                         target_resource=str(self.workspace),
                     )
                 except Exception:
-                    # Tool process ownership is local to this runtime. The service
-                    # tool itself owns process-tree cleanup and remains bounded.
                     pass
 
 
 class V53OllamaPressureScenario:
-    """Optional bounded three-model concurrency probe.
-
-    This is deliberately opt-in because simultaneously loading large local models
-    can consume significant RAM/VRAM. Each selected model receives one tiny prompt.
-    """
+    """Optional bounded three-model concurrency probe."""
 
     def __init__(self, client: OllamaProbeClient, models: list[str]) -> None:
         self.client = client
@@ -974,9 +969,9 @@ class V53WSLIsolationExecutionScenario:
             gateway.register_tool(tool)
             plan_id = tool.register_plan(plan)
             token = cap_service.issue_token(
-                project_id=uuid4(), task_id=uuid4(), contract_version=contract.version,
-                action_class=ActionClass.A1, target_resource=str(self.workspace),
-                allowed_operations=["run_isolated_command"],
+                project_id=uuid4(), task_id=uuid4(), contract_id=contract.contract_id,
+                contract_version=contract.version, action_class=ActionClass.A1,
+                target_resource=str(self.workspace), allowed_operations=["run_isolated_command"],
             )
             result = gateway.execute_tool(
                 tool_name="run_isolated_command",

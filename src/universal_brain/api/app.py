@@ -37,12 +37,13 @@ _WORKER_AUTH_EXEMPT_PATHS = {
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Runtime startup is state-neutral.
-
-    Operator/demo fixtures belong in tests or explicit demo commands. Starting
-    the control plane must never manufacture projects, evidence, approvals, or
-    health claims.
-    """
+    """Recover canonical durable state before serving production mutations."""
+    container = get_container()
+    if settings.app_env in {"production", "staging"}:
+        report = await container.recovery_manager.run_startup_recovery(settings.system_id)
+        container.mark_recovery_complete(report)
+        if not container.canonical_state_ready:
+            raise RuntimeError("canonical durable state recovery did not reach READY")
     yield
 
 
@@ -73,6 +74,20 @@ def create_app() -> FastAPI:
                     content={"detail": exc.detail},
                     headers=exc.headers or {},
                 )
+
+        if (
+            path.startswith("/api/v1")
+            and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}
+            and settings.app_env in {"production", "staging"}
+        ):
+            container = get_container()
+            if not container.canonical_state_ready:
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "detail": "canonical durable state is not recovered; mutations are disabled"
+                    },
+                )
         return await call_next(request)
 
     app.include_router(api_v1_router)
@@ -87,6 +102,9 @@ def create_app() -> FastAPI:
 
         websocket.state.operator_principal = principal
         container = get_container()
+        if settings.app_env in {"production", "staging"} and not container.canonical_state_ready:
+            await websocket.close(code=1013, reason="canonical state recovery incomplete")
+            return
         await container.ws_gateway.connect(websocket)
         try:
             while True:

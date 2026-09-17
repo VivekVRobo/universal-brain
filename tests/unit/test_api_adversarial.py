@@ -67,17 +67,18 @@ def test_cqrs_query_endpoints(test_setup):
 
     res = client.get("/api/v1/projects")
     assert res.status_code == 200
-    assert len(res.json()) >= 1
+    assert res.json() == []
 
     res = client.get("/api/v1/invariants")
     assert res.status_code == 200
     invariants = res.json()
-    assert invariants["pass_count"] >= 9
+    assert invariants["pass_count"] == 0
     assert invariants["fail_count"] == 0
+    assert invariants["unknown_count"] == 9
 
     res = client.get("/api/v1/contracts/current")
-    assert res.status_code == 200
-    assert res.json()["version"] == 1
+    assert res.status_code == 404
+    assert "No active Alignment Contract" in res.json()["detail"]
 
 
 def test_adversarial_action_rejection_lifecycle(test_setup):

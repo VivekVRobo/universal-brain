@@ -88,6 +88,22 @@ class CommandRunnerTool(BaseTool):
 
         success = (result.exit_code == 0 and result.termination_reason == TerminationReason.COMPLETED)
 
+        recorded_rollback = None
+        compensation = args.get("compensation_command")
+        verification = args.get("verification_command")
+        if (
+            isinstance(compensation, list)
+            and compensation
+            and isinstance(verification, list)
+            and verification
+        ):
+            recorded_rollback = {
+                "compensation_command": [str(item) for item in compensation],
+                "verification_command": [str(item) for item in verification],
+                "cwd": str(cwd.resolve()),
+                "timeout_seconds": int(args.get("rollback_timeout_seconds", 30)),
+            }
+
         return ToolResult(
             success=success,
             output=result.stdout_preview if success else f"{result.stdout_preview}\n{result.stderr_preview}",
@@ -100,31 +116,80 @@ class CommandRunnerTool(BaseTool):
                 "stderr_sha256": result.stderr_digest,
                 "truncated": result.truncated,
                 "isolation_level": result.isolation_level.value,
+                "rollback_recipe_recorded": recorded_rollback is not None,
             },
+            rollback_data=recorded_rollback,
             reversibility_class=self.reversibility_class,
             post_digest=result.stdout_digest,
         )
 
+    def _run_rollback_command(
+        self,
+        command: List[str],
+        rollback_data: Dict[str, Any],
+    ):
+        if not command:
+            return None
+        executable = str(command[0])
+        ExecutableRegistry.validate_executable(executable)
+        cwd = Path(rollback_data.get("cwd") or self.workspace_root)
+        confined_cwd = confine_path(cwd, self.workspace_root)
+        spec = CommandSpec(
+            task_id=uuid4(),
+            workspace_id=uuid4(),
+            executable=executable,
+            arguments=[str(item) for item in command[1:]],
+            cwd=confined_cwd,
+            timeout_seconds=int(rollback_data.get("timeout_seconds", 30)),
+            output_limit_bytes=self.default_output_limit_bytes,
+            environment_overrides={},
+            network_policy=NetworkPolicy.LOCAL_ONLY,
+            action_class=self.action_class,
+        )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                return pool.submit(
+                    asyncio.run,
+                    SubprocessRunner.run_spec(spec, self.workspace_root),
+                ).result()
+        return asyncio.run(SubprocessRunner.run_spec(spec, self.workspace_root))
+
     def rollback(self, rollback_data: Dict[str, Any]) -> bool:
+        """Run only an explicitly recorded compensation command.
+
+        A generic "checkpoint" marker is not a rollback mechanism and is rejected.
         """
-        Executes verified compensation command or validates checkpoint reversibility.
-        Fails closed (returns False) if neither is provided or compensation exits non-zero.
-        """
-        if "compensation_command" in rollback_data:
-            cmd = rollback_data["compensation_command"]
-            if isinstance(cmd, list) and len(cmd) > 0:
-                from universal_brain.tools.runner.schemas import CommandSpec
-                spec = CommandSpec(
-                    command=cmd[0],
-                    args=cmd[1:],
-                    timeout_seconds=rollback_data.get("timeout_seconds", 30),
-                )
-                res = self.runner.run(spec)
-                return res.exit_code == 0
+        command = rollback_data.get("compensation_command")
+        if not isinstance(command, list) or not command:
             return False
+        try:
+            result = self._run_rollback_command([str(item) for item in command], rollback_data)
+        except Exception:
+            return False
+        return bool(
+            result
+            and result.exit_code == 0
+            and result.termination_reason == TerminationReason.COMPLETED
+        )
 
-        if "checkpoint" in rollback_data:
-            # Reversibility handled via file tools / workspace checkpoint
-            return True
-
-        return False
+    def verify_rollback(self, rollback_data: Dict[str, Any]) -> bool:
+        """Verify compensation with a separate, explicitly recorded probe."""
+        command = rollback_data.get("verification_command")
+        if not isinstance(command, list) or not command:
+            return False
+        try:
+            result = self._run_rollback_command([str(item) for item in command], rollback_data)
+        except Exception:
+            return False
+        return bool(
+            result
+            and result.exit_code == 0
+            and result.termination_reason == TerminationReason.COMPLETED
+        )

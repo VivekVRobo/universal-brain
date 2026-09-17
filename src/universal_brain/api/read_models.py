@@ -13,6 +13,7 @@ from typing import Any, Iterable
 from uuid import UUID
 
 from universal_brain.alignment.contract import AlignmentContract, ContractStatus
+from universal_brain.autonomy.schemas import Mission
 from universal_brain.api.schemas import InvariantItem
 from universal_brain.kernel.errors import HashChainTamperError
 from universal_brain.kernel.events import EventEnvelope, EventType
@@ -20,6 +21,35 @@ from universal_brain.kernel.event_store import EventStore
 
 
 _CONTRACT_EVENTS = {EventType.CONTRACT_CREATED, EventType.CONTRACT_UPDATED}
+
+_MISSION_EVENTS = {
+    EventType.MISSION_CREATED,
+    EventType.MISSION_ACTIVATED,
+    EventType.MISSION_PAUSED,
+    EventType.MISSION_RESUMED,
+    EventType.MISSION_CANCELLED,
+    EventType.MISSION_COMPLETED,
+    EventType.MISSION_FAILED,
+    EventType.MISSION_WAKEUP_SCHEDULED,
+    EventType.MISSION_WAKEUP_FIRED,
+}
+
+
+def latest_mission(event_store: EventStore, mission_id: UUID) -> Mission | None:
+    """Return the latest fully materialized mission snapshot from canonical events."""
+    for event in reversed(event_store.get_all_events()):
+        if event.event_type not in _MISSION_EVENTS:
+            continue
+        raw = (event.payload or {}).get("mission")
+        if not isinstance(raw, dict):
+            continue
+        try:
+            mission = Mission.model_validate(raw)
+        except Exception:
+            continue
+        if mission.mission_id == mission_id:
+            return mission
+    return None
 
 
 def _contract_from_event(event: EventEnvelope) -> AlignmentContract | None:

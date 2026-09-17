@@ -241,8 +241,6 @@ class ToolGateway:
         if not tool:
             raise ValueError(f"Tool '{tool_name}' is not registered in Tool Gateway.")
 
-        self._assert_contract_executable(contract)
-
         effective_target = "*"
         if "checkpoint" in rollback_data and isinstance(rollback_data["checkpoint"], dict):
             cp = rollback_data["checkpoint"]
@@ -266,9 +264,25 @@ class ToolGateway:
                 tool_name=tool_name,
                 target_resource=effective_target,
             )
+            if capability_token.pre_state_hash:
+                checkpoint = rollback_data.get("checkpoint")
+                checkpoint_hash = None
+                if isinstance(checkpoint, dict):
+                    targets = checkpoint.get("targets") or []
+                    pre_hashes = checkpoint.get("pre_hashes") or {}
+                    if targets:
+                        checkpoint_hash = pre_hashes.get(targets[0])
+                if checkpoint_hash != capability_token.pre_state_hash:
+                    raise CapabilityDeniedError(
+                        "Rollback grant pre-state hash does not match rollback checkpoint."
+                    )
             project_id = capability_token.project_id
             task_id = capability_token.task_id
         else:
+            # Ordinary forward-action tokens remain subject to the currently
+            # executable contract. A dedicated RollbackGrant is the recovery path
+            # when forward permissions are no longer active.
+            self._assert_contract_executable(contract)
             self._assert_token_action_class(capability_token, tool.action_class)
             req_op = tool_name
             if capability_token.allowed_operations and "rollback" in capability_token.allowed_operations:
@@ -286,7 +300,13 @@ class ToolGateway:
             project_id = capability_token.project_id
             task_id = capability_token.task_id
 
-        success = tool.rollback(rollback_data)
+        rollback_error: str | None = None
+        try:
+            success = bool(tool.rollback(rollback_data))
+        except Exception as exc:
+            success = False
+            rollback_error = f"{type(exc).__name__}: {exc}"
+
         verified = False
         verification_error: str | None = None
 
@@ -322,7 +342,8 @@ class ToolGateway:
 
         failure_status = "ROLLBACK_UNVERIFIED" if success else "ROLLBACK_FAILED"
         failure_reason = (
-            verification_error
+            rollback_error
+            or verification_error
             or (
                 "Tool rollback returned success but independent post-state verification failed."
                 if success

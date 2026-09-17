@@ -66,13 +66,7 @@ class ToolGateway:
 
     @staticmethod
     def _assert_contract_executable(contract: AlignmentContract) -> None:
-        """Reassert alignment authority at the final execution boundary.
-
-        Callers are not trusted to have activated or revalidated the contract.
-        Tool execution therefore fails closed unless the supplied contract is
-        ACTIVE, its permissions are current, and no HIGH-impact ambiguity remains
-        unresolved.
-        """
+        """Reassert alignment authority at the final execution boundary."""
         if contract.status != ContractStatus.ACTIVE:
             raise ActionScopeViolationError(
                 f"Tool execution requires an ACTIVE Alignment Contract; got '{contract.status.value}'."
@@ -119,42 +113,26 @@ class ToolGateway:
         target_resource: str = "*",
         caused_by_event_id: Optional[UUID] = None,
     ) -> ToolResult:
-        """
-        Executes a registered tool within strict constitutional and cryptographic bounds:
-        1. Registry lookup
-        2. Active-contract / ambiguity / permission-expiry gate
-        3. Invariant ALN-018: prohibit physical actuator control
-        4. Capability validation, including token action-class ceiling
-        5. Contract permission ceiling check
-        6. Budget & Storage health gates (ALN-014)
-        7. Preflight reversibility check (ALN-007, ADR-0008)
-        8. Audit event emission: TOOL_CALLED -> Tool Execution -> EVIDENCE_PRODUCED (ALN-016)
-        """
-        # 1. Registry lookup
+        """Execute a registered tool only after all final-boundary checks pass."""
         tool = self._registry.get(tool_name)
         if not tool:
             raise ValueError(f"Tool '{tool_name}' is not registered in Tool Gateway.")
 
-        # 2. Reassert alignment authority at the final execution boundary.
         self._assert_contract_executable(contract)
 
-        # 3. ALN-018: Actuator Deny Rule
         if tool.action_class == ActionClass.A3:
             raise ActuatorProhibitedError(
                 f"Tool '{tool_name}' is classified as A3 (Prohibited Actuator Control) and is denied."
             )
 
-        # A capability token is a maximum authority ceiling, not merely signed metadata.
         self._assert_token_action_class(capability_token, tool.action_class)
 
-        # Extract authoritative target directly from tool invocation arguments
         effective_target = "*"
         for key in ("target", "path", "file_path", "filename", "resource"):
             if key in args and isinstance(args[key], str):
                 effective_target = args[key]
                 break
 
-        # Check for decoupling between caller-supplied target_resource and args
         from universal_brain.kernel.capability import (
             compute_canonical_request_digest,
             is_resource_authorized,
@@ -166,45 +144,42 @@ class ToolGateway:
                     f"Gateway target_resource '{target_resource}' conflicts with tool argument target '{effective_target}'."
                 )
 
-        # Compute request digest if token is request-bound
         computed_digest = None
         if capability_token.request_digest is not None:
             computed_digest = compute_canonical_request_digest(
                 tool_name=tool_name,
                 args=args,
                 action_class=tool.action_class,
+                contract_id=contract.contract_id,
                 contract_version=contract.version,
                 task_id=capability_token.task_id,
                 idempotency_key=capability_token.idempotency_key,
             )
 
-        # 4. Capability token validation
         self.capability_service.verify_token(
             token=capability_token,
             target_resource=effective_target if effective_target != "*" else target_resource,
             required_operation=tool_name,
+            current_contract_id=contract.contract_id,
             current_contract_version=contract.version,
             expected_request_digest=computed_digest,
+            required_action_class=tool.action_class,
         )
 
-        # 5. Contract permission ceiling check
         if _ACTION_CLASS_ORDER[tool.action_class] > _ACTION_CLASS_ORDER[contract.permissions.action_ceiling]:
             raise ActionScopeViolationError(
                 f"Tool '{tool_name}' action class ({tool.action_class.value}) exceeds "
                 f"contract permissions ceiling ({contract.permissions.action_ceiling.value})."
             )
 
-        # 6. Health gates: Budget & Storage
         self.budget.check_authorization(tool.action_class.value)
         self.retention.assert_write_permitted(tool.action_class.value)
 
-        # 7. Preflight check (reversibility)
         if not tool.preflight_check(args):
             raise RollbackPreflightError(
                 f"Preflight reversibility check failed for tool '{tool_name}' with args {args}."
             )
 
-        # 8. Record TOOL_CALLED event (ALN-016)
         call_event = self.store.append_event(
             event_type=EventType.TOOL_CALLED,
             actor_id=actor_id,
@@ -217,14 +192,13 @@ class ToolGateway:
                 "action_class": tool.action_class.value,
                 "target_resource": target_resource,
                 "token_id": str(capability_token.token_id),
+                "contract_id": str(contract.contract_id),
                 "reversibility_class": getattr(tool, "reversibility_class", "UNKNOWN"),
             },
         )
 
-        # Execute
         result = tool.execute(args)
 
-        # Record EVIDENCE_PRODUCED event linked via PROVES
         evidence_event = self.store.append_event(
             event_type=EventType.EVIDENCE_PRODUCED,
             actor_id="tool_gateway",
@@ -235,6 +209,7 @@ class ToolGateway:
                 "tool_name": tool_name,
                 "success": result.success,
                 "evidence": result.evidence,
+                "contract_id": str(contract.contract_id),
                 "reversibility_class": getattr(result, "reversibility_class", "UNKNOWN"),
                 "pre_digest": getattr(result, "pre_digest", None),
                 "post_digest": getattr(result, "post_digest", None),
@@ -247,12 +222,9 @@ class ToolGateway:
             relation_type=RelationType.PROVES,
         )
 
-        # Expose only audit identifiers; callers can causally link follow-up
-        # cognition without storing raw prompt/response bodies in the ledger.
         result.evidence = dict(result.evidence or {})
         result.evidence.setdefault("tool_call_event_id", str(call_event.event_id))
         result.evidence.setdefault("evidence_event_id", str(evidence_event.event_id))
-
         return result
 
     def rollback_tool(
@@ -264,18 +236,13 @@ class ToolGateway:
         actor_id: str = "operator",
         original_call_event_id: Optional[UUID] = None,
     ) -> bool:
-        """
-        Executes formal rollback of an A1 action and records tamper-evident audit trail.
-        (M5 Section 70, 71, Invariants ALN-007, ALN-016, M5-INV-04).
-        Enforces cryptographic verification of capability token or rollback grant.
-        """
+        """Execute formal rollback only with current contract and cryptographic authority."""
         tool = self._registry.get(tool_name)
         if not tool:
             raise ValueError(f"Tool '{tool_name}' is not registered in Tool Gateway.")
 
         self._assert_contract_executable(contract)
 
-        # Determine effective target from rollback data
         effective_target = "*"
         if "checkpoint" in rollback_data and isinstance(rollback_data["checkpoint"], dict):
             cp = rollback_data["checkpoint"]
@@ -293,7 +260,6 @@ class ToolGateway:
 
         from universal_brain.kernel.capability import RollbackGrant
 
-        # Cryptographic authority verification (Gate S1)
         if isinstance(capability_token, RollbackGrant):
             self.capability_service.verify_rollback_grant(
                 grant=capability_token,
@@ -313,7 +279,9 @@ class ToolGateway:
                 token=capability_token,
                 target_resource=effective_target,
                 required_operation=req_op,
+                current_contract_id=contract.contract_id,
                 current_contract_version=contract.version,
+                required_action_class=tool.action_class,
             )
             project_id = capability_token.project_id
             task_id = capability_token.task_id
@@ -330,6 +298,7 @@ class ToolGateway:
                 payload={
                     "tool_name": tool_name,
                     "status": "ROLLBACK_COMPLETED",
+                    "contract_id": str(contract.contract_id),
                     "rollback_data_keys": list(rollback_data.keys()),
                 },
                 caused_by_event_id=original_call_event_id,
@@ -351,6 +320,7 @@ class ToolGateway:
             payload={
                 "tool_name": tool_name,
                 "status": "ROLLBACK_FAILED",
+                "contract_id": str(contract.contract_id),
                 "error": "Tool rollback method returned False.",
             },
             caused_by_event_id=original_call_event_id,

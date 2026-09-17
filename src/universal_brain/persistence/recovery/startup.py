@@ -135,7 +135,7 @@ class StartupRecoveryManager:
                 self.system_status = "INTEGRITY_FAILURE"
                 await uow.rollback()
                 raise IntegrityFailureError(
-                    f"CRITICAL: canonical event recovery failed: {exc}"
+                    f"CRITICAL: Event hash-chain corrupted during canonical recovery: {exc}"
                 ) from exc
 
             leases_fenced = await uow.leases.fence_stale_leases(self.current_epoch)

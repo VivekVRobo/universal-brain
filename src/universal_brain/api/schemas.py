@@ -167,6 +167,8 @@ class ActionProposalResponse(BaseModel):
     evidence_items_count: int
     payload_hash: str
     authorization_digest: str
+    authorization_approved_at: datetime
+    nonce: str
     created_at: datetime
     expires_at: datetime
     seconds_remaining: int

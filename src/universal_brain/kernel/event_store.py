@@ -103,6 +103,32 @@ class EventStore:
             raise ValueError(f"Duplicate edge id {edge.edge_id} in canonical projection.")
         self._edges.append(edge)
 
+    def load_verified_history(
+        self,
+        events: List[EventEnvelope],
+        edges: List[EventEdge],
+        *,
+        initialize_journal: bool = False,
+    ) -> int:
+        """Replace the projection with externally loaded history after verification.
+
+        initialize_journal is reserved for one-time migration from the legacy
+        SQL event ledger into an empty canonical journal.
+        """
+        self._reset_projection()
+        for event in events:
+            self._project_event(event, enqueue_outbox=False)
+        for edge in edges:
+            self._project_edge(edge)
+        self.verify_chain_integrity()
+
+        if initialize_journal:
+            if self._journal is None:
+                raise RuntimeError("Cannot initialize journal on an in-memory EventStore.")
+            self._journal.initialize_from_history(events, edges)
+
+        return self.event_count
+
     def rehydrate_from_journal(self) -> int:
         """Rebuild the entire in-memory projection deterministically from the journal."""
         if self._journal is None:

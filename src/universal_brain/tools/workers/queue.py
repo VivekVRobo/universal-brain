@@ -74,7 +74,7 @@ class EphemeralJobQueue:
             if job.status == JobStatus.COMPLETED and job.idempotency_key:
                 self._completed_idempotency_keys[job.idempotency_key] = job.job_id
 
-    def _commit_job(self, event_type: EventType, job: WorkerJob, transition: str) -> None:
+    def _commit_job(self, event_type: EventType, job: WorkerJob, transition: str) -> WorkerJob:
         if self.event_store is not None:
             self.event_store.append_event(
                 event_type=event_type,
@@ -86,9 +86,21 @@ class EphemeralJobQueue:
                 project_id=job.project_id,
                 task_id=job.task_id,
             )
-        self._jobs[job.job_id] = job
-        if job.status == JobStatus.COMPLETED and job.idempotency_key:
-            self._completed_idempotency_keys[job.idempotency_key] = job.job_id
+
+        existing = self._jobs.get(job.job_id)
+        if existing is not None and existing is not job:
+            # Preserve public object identity for callers holding a job reference,
+            # but mutate it only after the canonical journal commit has succeeded.
+            for field_name in WorkerJob.model_fields:
+                setattr(existing, field_name, getattr(job, field_name))
+            committed = existing
+        else:
+            committed = job
+
+        self._jobs[job.job_id] = committed
+        if committed.status == JobStatus.COMPLETED and committed.idempotency_key:
+            self._completed_idempotency_keys[committed.idempotency_key] = committed.job_id
+        return committed
 
     def get_job(self, job_id: UUID) -> Optional[WorkerJob]:
         return self._jobs.get(job_id)
@@ -129,8 +141,7 @@ class EphemeralJobQueue:
             idempotency_key=idempotency_key,
         )
         job = job.model_copy(update={"payload_digest": job.compute_payload_digest()})
-        self._commit_job(EventType.WORKER_JOB_ENQUEUED, job, "ENQUEUED")
-        return job
+        return self._commit_job(EventType.WORKER_JOB_ENQUEUED, job, "ENQUEUED")
 
     def poll_and_lease(
         self,
@@ -186,8 +197,8 @@ class EphemeralJobQueue:
                 "status": JobStatus.LEASED,
             }
         )
-        self._commit_job(EventType.WORKER_JOB_LEASED, updated, "LEASED")
-        return updated, lease
+        committed = self._commit_job(EventType.WORKER_JOB_LEASED, updated, "LEASED")
+        return committed, committed.current_lease
 
     def record_progress(
         self,
@@ -364,5 +375,4 @@ class EphemeralJobQueue:
                 "completed_at": datetime.now(timezone.utc),
             }
         )
-        self._commit_job(EventType.WORKER_JOB_COMPLETED, updated, "COMPLETED")
-        return updated
+        return self._commit_job(EventType.WORKER_JOB_COMPLETED, updated, "COMPLETED")

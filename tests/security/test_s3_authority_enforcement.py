@@ -97,6 +97,7 @@ def test_a0_token_cannot_execute_a1_tool(tmp_path: Path):
     token = capabilities.issue_token(
         project_id=project_id,
         task_id=task_id,
+        contract_id=contract.contract_id,
         contract_version=contract.version,
         action_class=ActionClass.A0,
         target_resource="protected.txt",
@@ -114,12 +115,61 @@ def test_a0_token_cannot_execute_a1_tool(tmp_path: Path):
     assert not (tmp_path / "protected.txt").exists()
 
 
+def test_unbound_legacy_token_cannot_cross_tool_gateway(tmp_path: Path):
+    gateway, capabilities, project_id, task_id = _gateway(tmp_path)
+    contract = _contract()
+    token = capabilities.issue_token(
+        project_id=project_id,
+        task_id=task_id,
+        contract_version=contract.version,
+        action_class=ActionClass.A1,
+        target_resource="legacy.txt",
+        allowed_operations=["write_file"],
+    )
+
+    with pytest.raises(CapabilityDeniedError, match="not bound to a contract identity"):
+        gateway.execute_tool(
+            tool_name="write_file",
+            args={"target": "legacy.txt", "content": "must not be written"},
+            capability_token=token,
+            contract=contract,
+        )
+
+    assert not (tmp_path / "legacy.txt").exists()
+
+
+def test_token_for_different_contract_is_rejected(tmp_path: Path):
+    gateway, capabilities, project_id, task_id = _gateway(tmp_path)
+    active_contract = _contract()
+    other_contract = _contract()
+    token = capabilities.issue_token(
+        project_id=project_id,
+        task_id=task_id,
+        contract_id=other_contract.contract_id,
+        contract_version=active_contract.version,
+        action_class=ActionClass.A1,
+        target_resource="cross-contract.txt",
+        allowed_operations=["write_file"],
+    )
+
+    with pytest.raises(CapabilityDeniedError, match="does not match active contract"):
+        gateway.execute_tool(
+            tool_name="write_file",
+            args={"target": "cross-contract.txt", "content": "must not be written"},
+            capability_token=token,
+            contract=active_contract,
+        )
+
+    assert not (tmp_path / "cross-contract.txt").exists()
+
+
 def test_draft_contract_cannot_execute_tool(tmp_path: Path):
     gateway, capabilities, project_id, task_id = _gateway(tmp_path)
     contract = _contract(active=False)
     token = capabilities.issue_token(
         project_id=project_id,
         task_id=task_id,
+        contract_id=contract.contract_id,
         contract_version=contract.version,
         action_class=ActionClass.A1,
         target_resource="draft.txt",
@@ -143,6 +193,7 @@ def test_high_impact_blocked_ambiguity_is_rechecked_at_gateway(tmp_path: Path):
     token = capabilities.issue_token(
         project_id=project_id,
         task_id=task_id,
+        contract_id=contract.contract_id,
         contract_version=contract.version,
         action_class=ActionClass.A1,
         target_resource="ambiguous.txt",
@@ -166,6 +217,7 @@ def test_expired_contract_permissions_fail_closed(tmp_path: Path):
     token = capabilities.issue_token(
         project_id=project_id,
         task_id=task_id,
+        contract_id=contract.contract_id,
         contract_version=contract.version,
         action_class=ActionClass.A1,
         target_resource="expired.txt",

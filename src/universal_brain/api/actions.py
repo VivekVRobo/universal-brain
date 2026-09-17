@@ -7,6 +7,9 @@ Implements Section 3 of the Operator Console Specification:
 - Optimistic concurrency (proposal_version tracking);
 - Strict separation of Reject (no rollback) vs. Rollback (undo executed state);
 - Command idempotency tracking.
+
+Version 1 is single-operator: operator identity is canonical server configuration,
+not a request-body authority claim.
 """
 
 from __future__ import annotations
@@ -27,8 +30,6 @@ from universal_brain.kernel.events import ActionClass
 
 
 class ActionStatus(str, Enum):
-    """Authoritative lifecycle status for consequential actions."""
-
     DRAFT = "DRAFT"
     PROPOSED = "PROPOSED"
     PREFLIGHTING = "PREFLIGHTING"
@@ -85,9 +86,14 @@ class ActionProposal(BaseModel):
 
     def compute_authorization_digest(
         self,
-        operator_identity: str,
+        operator_identity: Optional[str] = None,
         approved_at: Optional[datetime] = None,
     ) -> str:
+        """Bind approval to the canonical server-side operator identity.
+
+        ``operator_identity`` remains accepted for compatibility with old clients,
+        but it is intentionally not authoritative in Version 1.
+        """
         app_time = approved_at or datetime.now(timezone.utc)
         preflight_digest = hashlib.sha256(f"preflight:{self.preflight_passed}".encode("utf-8")).hexdigest()
         rollback_digest = hashlib.sha256(self.rollback_plan.encode("utf-8")).hexdigest()
@@ -102,7 +108,7 @@ class ActionProposal(BaseModel):
             "created_at": self.created_at.isoformat(timespec="microseconds") + "Z",
             "expires_at": self.expires_at.isoformat(timespec="microseconds") + "Z",
             "nonce": self.nonce,
-            "operator_identity": operator_identity,
+            "operator_identity": settings.operator_id,
             "preflight_evidence_digest": preflight_digest,
             "proposal_version": self.proposal_version,
             "required_capabilities": sorted(self.required_capabilities),
@@ -121,6 +127,10 @@ class ActionManager:
         self.capability_service = capability_service
         self._proposals: Dict[UUID, ActionProposal] = {}
         self._idempotency_cache: Dict[str, Dict[str, Any]] = {}
+
+    @staticmethod
+    def _operator_identity() -> str:
+        return settings.operator_id
 
     def get_proposal(self, action_id: UUID) -> Optional[ActionProposal]:
         return self._proposals.get(action_id)
@@ -190,43 +200,44 @@ class ActionManager:
         if proposal.status != ActionStatus.AWAITING_APPROVAL:
             raise ActionScopeViolationError(
                 f"Action '{action_id}' is in status '{proposal.status.value}'; "
-                f"only 'AWAITING_APPROVAL' actions can be approved."
+                "only 'AWAITING_APPROVAL' actions can be approved."
             )
 
         if proposal.is_expired(current_time):
             proposal.status = ActionStatus.EXPIRED
             raise CapabilityDeniedError(
                 f"Action approval deadline expired at {proposal.expires_at.isoformat()}. "
-                f"Proposal transitioned to EXPIRED."
+                "Proposal transitioned to EXPIRED."
             )
 
         if proposal.proposal_version != proposal_version:
             raise ActionScopeViolationError(
-                f"APPROVAL_INVALIDATED: PROPOSAL_CHANGED_AFTER_REVIEW. "
+                "APPROVAL_INVALIDATED: PROPOSAL_CHANGED_AFTER_REVIEW. "
                 f"Reviewed version was {proposal_version}, current version is {proposal.proposal_version}."
             )
 
         if proposal.nonce != nonce:
             raise CapabilityDeniedError("Invalid or replayed authorization nonce.")
 
+        canonical_operator = self._operator_identity()
         now = approved_at or current_time or datetime.now(timezone.utc)
-        expected_digest = proposal.compute_authorization_digest(
-            operator_identity=operator_id,
-            approved_at=now,
-        )
+        expected_digest = proposal.compute_authorization_digest(approved_at=now)
         if authorization_digest.lower() != expected_digest.lower():
             raise CapabilityDeniedError(
                 "Authorization digest mismatch. Target, contract, preflight, or payload has mutated."
             )
 
+        # Authentication is now present, but A2 remains deliberately locked until
+        # the separate consequential-action challenge/rollback policy is completed.
         if proposal.action_class == ActionClass.A2:
             raise CapabilityDeniedError(
-                "A2_LOCKED_PENDING_OPERATOR_AUTH: A2 consequential approvals are locked pending verified operator authentication middleware and challenge synchronization."
+                "A2_LOCKED_PENDING_CHALLENGE_POLICY: authenticated operator control plane is active, "
+                "but consequential execution remains disabled pending the dedicated A2 challenge and rollback gate."
             )
 
         proposal.status = ActionStatus.AUTHORIZED
         proposal.approved_at = now
-        proposal.operator_identity = operator_id
+        proposal.operator_identity = canonical_operator
 
         token = self.capability_service.issue_token(
             project_id=proposal.project_id,
@@ -270,7 +281,7 @@ class ActionManager:
             )
 
         proposal.status = ActionStatus.REJECTED
-        proposal.operator_identity = operator_id
+        proposal.operator_identity = self._operator_identity()
 
         if idempotency_key:
             self._idempotency_cache[idempotency_key] = {"proposal": proposal.model_dump()}
@@ -294,15 +305,18 @@ class ActionManager:
         if proposal.status not in (ActionStatus.FAILED, ActionStatus.PARTIAL, ActionStatus.SUCCEEDED):
             raise ActionScopeViolationError(
                 f"Cannot rollback action in status '{proposal.status.value}'. "
-                f"Rollback requires an executed, failed, or partial state."
+                "Rollback requires an executed, failed, or partial state."
             )
 
         if proposal.action_class == ActionClass.A2:
             raise CapabilityDeniedError(
-                "A2_LOCKED_PENDING_OPERATOR_AUTH: Rollback execution of A2 actions is locked pending verified operator authentication middleware and signed RollbackGrant."
+                "A2_LOCKED_PENDING_CHALLENGE_POLICY: authenticated operator control plane is active, "
+                "but A2 rollback remains disabled pending a signed RollbackGrant challenge flow."
             )
 
+        # NOTE: physical/external compensation is addressed in Root Problem 4.
         proposal.status = ActionStatus.ROLLED_BACK
+        proposal.operator_identity = self._operator_identity()
 
         if idempotency_key:
             self._idempotency_cache[idempotency_key] = {"proposal": proposal.model_dump()}

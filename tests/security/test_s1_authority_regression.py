@@ -21,7 +21,7 @@ from universal_brain.alignment.engine import AmbiguityClassifier
 from universal_brain.api.actions import ActionStatus
 from universal_brain.api.app import app
 from universal_brain.api.dependencies import get_container
-from universal_brain.config import Settings
+from universal_brain.config import Settings, settings
 from universal_brain.kernel.capability import (
     CapabilityService,
     CapabilityToken,
@@ -80,6 +80,10 @@ def _write_gateway(tmp_path: Path, project_id: UUID, task_id: UUID):
     gateway = ToolGateway(event_store=EventStore(), capability_service=capabilities)
     gateway.register_tool(tool)
     return gateway, capabilities
+
+
+def _operator_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {settings.operator_api_key}"}
 
 
 def test_argument_target_tampering_rejected_by_request_bound_token(
@@ -308,32 +312,34 @@ def test_a2_endpoints_return_forbidden_under_stabilization_lockdown():
         rollback_plan="disable()",
         preflight_passed=True,
     )
-    digest = proposal.compute_authorization_digest("operator-vivek", now)
+    digest = proposal.compute_authorization_digest(approved_at=now)
     approve = client.post(
         f"/api/v1/actions/{proposal.action_id}/approve",
         json={
             "action_id": str(proposal.action_id),
             "proposal_version": proposal.proposal_version,
-            "operator_id": "operator-vivek",
+            "operator_id": "untrusted-request-body-value",
             "authorization_digest": digest,
             "nonce": proposal.nonce,
             "approved_at": now.isoformat(),
         },
+        headers=_operator_headers(),
     )
     assert approve.status_code == 403
-    assert "A2_LOCKED_PENDING_OPERATOR_AUTH" in approve.json()["detail"]
+    assert "A2_LOCKED_PENDING_CHALLENGE_POLICY" in approve.json()["detail"]
 
     proposal.status = ActionStatus.SUCCEEDED
     rollback = client.post(
         f"/api/v1/actions/{proposal.action_id}/rollback",
         json={
             "action_id": str(proposal.action_id),
-            "operator_id": "operator-vivek",
+            "operator_id": "untrusted-request-body-value",
             "reason": "testing A2 rollback lockdown",
         },
+        headers=_operator_headers(),
     )
     assert rollback.status_code == 403
-    assert "A2_LOCKED_PENDING_OPERATOR_AUTH" in rollback.json()["detail"]
+    assert "A2_LOCKED_PENDING_CHALLENGE_POLICY" in rollback.json()["detail"]
 
 
 def test_unrecognized_ambiguity_strictly_defaults_to_medium():
@@ -345,21 +351,32 @@ def test_unrecognized_ambiguity_strictly_defaults_to_medium():
 
 
 def test_production_environment_rejects_development_secrets():
+    secure_operator_key = "secure-operator-key-for-production-tests-123456789"
     with pytest.raises(ValueError, match="hmac_secret_key must be an externally configured secret"):
         Settings(
             app_env="production",
             hmac_secret_key="dev-secret-key-change-in-production-min-32-chars-long",
+            operator_api_key=secure_operator_key,
             database_url="postgresql+asyncpg://admin:secure_pass@localhost:5432/brain",
         )
     with pytest.raises(ValueError, match="database_url must not contain default development credentials"):
         Settings(
             app_env="staging",
             hmac_secret_key="a_very_secure_production_secret_key_1234567890",
+            operator_api_key=secure_operator_key,
             database_url="postgresql+asyncpg://admin:brain_dev_password@localhost:5432/brain",
+        )
+    with pytest.raises(ValueError, match="operator_api_key must be an externally configured secret"):
+        Settings(
+            app_env="production",
+            hmac_secret_key="a_very_secure_production_secret_key_1234567890",
+            operator_api_key="dev-operator-key-change-in-production-min-32-chars",
+            database_url="postgresql+asyncpg://admin:secure_prod_password@localhost:5432/brain",
         )
     prod = Settings(
         app_env="production",
         hmac_secret_key="a_very_secure_production_secret_key_1234567890",
+        operator_api_key=secure_operator_key,
         database_url="postgresql+asyncpg://admin:secure_prod_password@localhost:5432/brain",
     )
     assert prod.app_env == "production"

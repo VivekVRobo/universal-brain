@@ -3,12 +3,10 @@ import { CausalGraph, CausalGraphNode } from "../types";
 import { ApiClient } from "../services/api";
 import {
   Copy,
-  GitBranch,
   HelpCircle,
   Info,
   Network,
   RotateCcw,
-  ShieldCheck,
 } from "lucide-react";
 
 export const EventGraphExplorer: React.FC = () => {

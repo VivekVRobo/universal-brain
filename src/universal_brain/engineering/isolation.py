@@ -168,6 +168,10 @@ class WSL2IsolationProvider:
                 raise IsolationError("network allowlist mode requires at least one host")
             if not self.capabilities.allowlist_network:
                 raise IsolationError("WSL2 isolation cannot enforce network allowlist policy")
+            raise IsolationError(
+                "WSL2 network allowlist has no executable enforcement backend; "
+                "use network DENY until an egress guard is configured and verified"
+            )
 
 
 class HyperVIsolationProvider:
@@ -214,8 +218,8 @@ class HyperVIsolationProvider:
             host_cwd=host_cwd.resolve(),
             workspace_root=workspace_root.resolve(),
             quota=quota,
-            enforced_controls=["memory", "cpu", "pids", "network-policy", "wall-timeout"],
-            notes=["resource/network controls are pre-attested VM policy"],
+            enforced_controls=[],
+            notes=["runtime Hyper-V policy attestation required before execution"],
         )
 
     def _validate(self, quota: IsolationQuota) -> None:
@@ -240,13 +244,26 @@ class AuthorityGatedIsolationRuntime:
         self.backend = backend
 
     async def execute(self, plan: IsolationCommandPlan) -> EngineeringToolObservation:
-        if not plan.enforced_controls:
-            raise IsolationError("isolation plan has no attested controls")
         observation = await self.backend.execute_plan(plan)
         if not observation.success:
             return observation
+
         evidence = dict(observation.evidence)
-        evidence.setdefault("isolation_provider", plan.provider)
-        evidence.setdefault("enforced_controls", list(plan.enforced_controls))
-        evidence.setdefault("network_mode", plan.quota.network_mode.value)
+        verified_controls = set(evidence.get("verified_controls") or [])
+        required_controls = {"memory", "cpu", "pids", "wall-timeout"}
+        if plan.quota.network_mode == NetworkMode.DENY:
+            required_controls.add("network-deny")
+        elif plan.quota.network_mode == NetworkMode.ALLOWLIST:
+            required_controls.add("network-allowlist")
+
+        missing = sorted(required_controls - verified_controls)
+        if missing:
+            raise IsolationError(
+                "isolation backend did not prove required controls: "
+                + ", ".join(missing)
+            )
+
+        evidence["isolation_provider"] = plan.provider
+        evidence["network_mode"] = plan.quota.network_mode.value
+        evidence["verified_controls"] = sorted(verified_controls)
         return observation.model_copy(update={"evidence": evidence})

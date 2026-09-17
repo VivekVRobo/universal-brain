@@ -11,13 +11,11 @@ import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import AsyncGenerator
-from uuid import UUID
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from universal_brain.api.actions import ActionStatus
 from universal_brain.api.auth import (
     authenticate_operator_request,
     authenticate_operator_token,
@@ -26,7 +24,6 @@ from universal_brain.api.auth import (
 from universal_brain.api.dependencies import get_container
 from universal_brain.api.router import router as api_v1_router
 from universal_brain.config import settings
-from universal_brain.kernel.events import ActionClass, EventType
 
 
 # Worker execution endpoints carry their own scoped worker bearer tokens. Worker
@@ -38,89 +35,14 @@ _WORKER_AUTH_EXEMPT_PATHS = {
 }
 
 
-def preseed_baseline_domain_state() -> None:
-    """Pre-seeds realistic domain state into the runtime singletons."""
-    container = get_container()
-
-    if container.event_store.event_count == 0:
-        p_id = UUID("00000000-0000-0000-0000-000000000001")
-        t_id = UUID("00000000-0000-0000-0000-000000000002")
-
-        e1 = container.event_store.append_event(
-            event_type=EventType.USER_INPUT,
-            actor_id="operator",
-            payload={"utterance": "Design and deploy a verified ROS 2 Humble PID controller for humanoid balance."},
-            project_id=p_id,
-        )
-        e2 = container.event_store.append_event(
-            event_type=EventType.INTENT_PARSED,
-            actor_id="executive_kernel",
-            payload={
-                "goal": "Humanoid PID Controller Bringup",
-                "requirements": ["REQ-001", "REQ-002"],
-                "action_ceiling": "A2",
-            },
-            project_id=p_id,
-            caused_by_event_id=e1.event_id,
-        )
-        e3 = container.event_store.append_event(
-            event_type=EventType.CONTRACT_CREATED,
-            actor_id="alignment_engine",
-            payload={"contract_id": "00000000-0000-0000-0000-000000000010", "version": 1, "status": "active"},
-            project_id=p_id,
-            caused_by_event_id=e2.event_id,
-        )
-        e4 = container.event_store.append_event(
-            event_type=EventType.TASK_ASSIGNED,
-            actor_id="executive_router",
-            payload={"task_id": str(t_id), "assigned_agent": "RoboticsCoder", "model": "claude-3-5-sonnet"},
-            project_id=p_id,
-            task_id=t_id,
-            caused_by_event_id=e3.event_id,
-        )
-        e5 = container.event_store.append_event(
-            event_type=EventType.TOOL_CALLED,
-            actor_id="RoboticsCoder",
-            payload={"tool": "patch_file", "target": "./src/pid_controller.cpp", "lines_changed": 48},
-            project_id=p_id,
-            task_id=t_id,
-            caused_by_event_id=e4.event_id,
-        )
-        container.event_store.append_event(
-            event_type=EventType.EVIDENCE_PRODUCED,
-            actor_id="tool_gateway",
-            payload={
-                "evidence_type": "colcon_build_log",
-                "summary": "14/14 unit tests passed. Headless Gazebo physics simulation completed with 0 collisions.",
-                "build_exit_code": 0,
-            },
-            project_id=p_id,
-            task_id=t_id,
-            caused_by_event_id=e5.event_id,
-        )
-
-    if not container.action_manager.list_proposals():
-        container.action_manager.create_proposal(
-            project_id=UUID("00000000-0000-0000-0000-000000000001"),
-            task_id=UUID("00000000-0000-0000-0000-000000000002"),
-            contract_id=UUID("00000000-0000-0000-0000-000000000010"),
-            contract_version=1,
-            action_type="PHYSICAL_TESTBED_DEPLOYMENT",
-            target_resource="/dev/ttyUSB0 (CAN Bus Transceiver - Humanoid Actuators)",
-            action_class=ActionClass.A2,
-            requested_effect="Enable CAN bus power relay and stream trajectory target to knee pitch motors.",
-            payload={"launch_file": "humanoid_bringup.launch.py", "baud_rate": 1000000, "can_channel": "can0"},
-            required_capabilities=["can:transmit", "relay:power_on"],
-            diff_preview="+ CAN_TRANSCEIVER_ENABLE = 0x01;\n+ ros2 launch humanoid_bringup physical.launch.py",
-            rollback_plan="Immediate SIGINT on launch process, followed by GPIO relay power disconnect to CAN bus.",
-            preflight_passed=True,
-            evidence_items_count=3,
-        )
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    preseed_baseline_domain_state()
+    """Runtime startup is state-neutral.
+
+    Operator/demo fixtures belong in tests or explicit demo commands. Starting
+    the control plane must never manufacture projects, evidence, approvals, or
+    health claims.
+    """
     yield
 
 

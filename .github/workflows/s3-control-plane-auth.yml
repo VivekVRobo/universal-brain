@@ -8,6 +8,9 @@ on:
     paths:
       - "src/universal_brain/api/**"
       - "src/universal_brain/config.py"
+      - "console/src/**"
+      - "console/package.json"
+      - "console/package-lock.json"
       - "tests/security/**"
       - "tests/unit/test_api_adversarial.py"
       - ".github/workflows/s3-control-plane-auth.yml"
@@ -47,3 +50,18 @@ jobs:
           tests/security/test_s1_authority_regression.py
           tests/security/test_s3_authority_enforcement.py
           tests/unit/test_api_adversarial.py
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+
+      - name: Install console dependencies
+        working-directory: console
+        run: npm ci
+
+      - name: Build authenticated operator console
+        working-directory: console
+        run: npm run build

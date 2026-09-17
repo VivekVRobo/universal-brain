@@ -76,12 +76,10 @@ class ActionProposal(BaseModel):
     nonce: str = Field(default_factory=lambda: uuid4().hex)
 
     def is_expired(self, current_time: Optional[datetime] = None) -> bool:
-        """Check if 6-hour dead-man's deadline has elapsed."""
         now = current_time or datetime.now(timezone.utc)
         return now > self.expires_at
 
     def compute_payload_hash(self) -> str:
-        """Compute deterministic SHA-256 over action payload."""
         json_bytes = json.dumps(self.payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return hashlib.sha256(json_bytes).hexdigest()
 
@@ -90,13 +88,6 @@ class ActionProposal(BaseModel):
         operator_identity: str,
         approved_at: Optional[datetime] = None,
     ) -> str:
-        """
-        Computes the 16-field Authorization Digest binding:
-        action_id, proposal_version, canonical_payload_hash, target_identity,
-        action_class, contract_id, contract_version, required_capabilities,
-        preflight_evidence_digest, rollback_plan_digest, operator_identity,
-        created_at, approved_at, expires_at, nonce, system_id.
-        """
         app_time = approved_at or datetime.now(timezone.utc)
         preflight_digest = hashlib.sha256(f"preflight:{self.preflight_passed}".encode("utf-8")).hexdigest()
         rollback_digest = hashlib.sha256(self.rollback_plan.encode("utf-8")).hexdigest()
@@ -132,11 +123,9 @@ class ActionManager:
         self._idempotency_cache: Dict[str, Dict[str, Any]] = {}
 
     def get_proposal(self, action_id: UUID) -> Optional[ActionProposal]:
-        """Fetch proposal by ID."""
         return self._proposals.get(action_id)
 
     def list_proposals(self, project_id: Optional[UUID] = None) -> List[ActionProposal]:
-        """List proposals, optionally filtered by project."""
         proposals = list(self._proposals.values())
         if project_id:
             proposals = [p for p in proposals if p.project_id == project_id]
@@ -159,7 +148,6 @@ class ActionManager:
         preflight_passed: bool = True,
         evidence_items_count: int = 1,
     ) -> ActionProposal:
-        """Instantiate a new action proposal."""
         proposal = ActionProposal(
             project_id=project_id,
             task_id=task_id,
@@ -191,22 +179,10 @@ class ActionManager:
         current_time: Optional[datetime] = None,
         approved_at: Optional[datetime] = None,
     ) -> CapabilityToken:
-        """
-        Approves an action proposal with strict TOCTOU and optimistic concurrency verification:
-        1. Idempotency check.
-        2. Action exists and is in AWAITING_APPROVAL status.
-        3. Expiry verification (6-hour dead-man's deadline).
-        4. Optimistic concurrency check (proposal_version must match).
-        5. Nonce and Authorization Digest verification.
-        6. State transition: AWAITING_APPROVAL -> APPROVED -> AUTHORIZED.
-        7. Issue CapabilityToken via CapabilityService.
-        """
-        # 1. Idempotency
         if idempotency_key and idempotency_key in self._idempotency_cache:
             cached = self._idempotency_cache[idempotency_key]
             return CapabilityToken.model_validate(cached["token"])
 
-        # 2. Lookup proposal
         proposal = self.get_proposal(action_id)
         if not proposal:
             raise ValueError(f"Action proposal '{action_id}' does not exist.")
@@ -217,7 +193,6 @@ class ActionManager:
                 f"only 'AWAITING_APPROVAL' actions can be approved."
             )
 
-        # 3. Expiry verification
         if proposal.is_expired(current_time):
             proposal.status = ActionStatus.EXPIRED
             raise CapabilityDeniedError(
@@ -225,18 +200,15 @@ class ActionManager:
                 f"Proposal transitioned to EXPIRED."
             )
 
-        # 4. Optimistic concurrency check
         if proposal.proposal_version != proposal_version:
             raise ActionScopeViolationError(
                 f"APPROVAL_INVALIDATED: PROPOSAL_CHANGED_AFTER_REVIEW. "
                 f"Reviewed version was {proposal_version}, current version is {proposal.proposal_version}."
             )
 
-        # 5. Nonce check
         if proposal.nonce != nonce:
             raise CapabilityDeniedError("Invalid or replayed authorization nonce.")
 
-        # 6. Recompute and assert Authorization Digest
         now = approved_at or current_time or datetime.now(timezone.utc)
         expected_digest = proposal.compute_authorization_digest(
             operator_identity=operator_id,
@@ -247,21 +219,19 @@ class ActionManager:
                 "Authorization digest mismatch. Target, contract, preflight, or payload has mutated."
             )
 
-        # Gate S1 A2 Execution Lockdown:
         if proposal.action_class == ActionClass.A2:
             raise CapabilityDeniedError(
                 "A2_LOCKED_PENDING_OPERATOR_AUTH: A2 consequential approvals are locked pending verified operator authentication middleware and challenge synchronization."
             )
 
-        # 7. Update status
         proposal.status = ActionStatus.AUTHORIZED
         proposal.approved_at = now
         proposal.operator_identity = operator_id
 
-        # 8. Issue CapabilityToken
         token = self.capability_service.issue_token(
             project_id=proposal.project_id,
             task_id=proposal.task_id,
+            contract_id=proposal.contract_id,
             contract_version=proposal.contract_version,
             action_class=proposal.action_class,
             target_resource=proposal.target_resource,
@@ -282,10 +252,6 @@ class ActionManager:
         reason: str,
         idempotency_key: Optional[str] = None,
     ) -> ActionProposal:
-        """
-        Rejects an unexecuted proposal.
-        Does NOT execute rollback because no state was mutated!
-        """
         if idempotency_key and idempotency_key in self._idempotency_cache:
             return ActionProposal.model_validate(self._idempotency_cache[idempotency_key]["proposal"])
 
@@ -318,9 +284,6 @@ class ActionManager:
         reason: str,
         idempotency_key: Optional[str] = None,
     ) -> ActionProposal:
-        """
-        Executes rollback on an action that previously changed state or failed mid-execution.
-        """
         if idempotency_key and idempotency_key in self._idempotency_cache:
             return ActionProposal.model_validate(self._idempotency_cache[idempotency_key]["proposal"])
 
@@ -328,7 +291,6 @@ class ActionManager:
         if not proposal:
             raise ValueError(f"Action proposal '{action_id}' does not exist.")
 
-        # Rollback only allowed if action executed, failed, or is in partial state
         if proposal.status not in (ActionStatus.FAILED, ActionStatus.PARTIAL, ActionStatus.SUCCEEDED):
             raise ActionScopeViolationError(
                 f"Cannot rollback action in status '{proposal.status.value}'. "

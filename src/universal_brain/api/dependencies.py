@@ -51,7 +51,10 @@ class RuntimeContainer:
         self.budget_gatekeeper = budget_gatekeeper or BudgetGatekeeper()
         self.retention_manager = retention_manager or StorageRetentionManager(critical_threshold_pct=99.9)
         self.alignment_engine = alignment_engine or AlignmentEngine()
-        self.action_manager = action_manager or ActionManager(self.capability_service)
+        self.action_manager = action_manager or ActionManager(
+            self.capability_service,
+            event_store=self.event_store,
+        )
         self.ws_gateway = ws_gateway or WebSocketGateway()
         self.tool_gateway = tool_gateway or ToolGateway(
             event_store=self.event_store,
@@ -59,7 +62,7 @@ class RuntimeContainer:
             budget_gatekeeper=self.budget_gatekeeper,
             retention_manager=self.retention_manager,
         )
-        self.job_queue = job_queue or EphemeralJobQueue()
+        self.job_queue = job_queue or EphemeralJobQueue(event_store=self.event_store)
         self.worker_auth = worker_auth or WorkerAuthService()
 
         # Traceability: REQ-STA-001 (local-first canonical state) and ALN-014

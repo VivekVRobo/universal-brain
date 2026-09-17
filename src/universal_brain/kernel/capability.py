@@ -33,15 +33,7 @@ _ACTION_CLASS_ORDER = {
 
 
 def is_resource_authorized(pattern: str, target: str) -> bool:
-    """
-    Checks if a target resource conforms to an authorized pattern.
-    Enforces segment-aware boundaries:
-    - '*' matches anything.
-    - Exact matches match.
-    - 'safe/*' matches 'safe/foo.txt', but strictly rejects 'safeevil'.
-    - 'safe/' prefix matches anything under 'safe/'.
-    - Never treats 'safe*' as matching 'safeevil'.
-    """
+    """Boundary-safe resource-scope matching."""
     if pattern == "*" or pattern == target:
         return True
 
@@ -76,16 +68,16 @@ def compute_canonical_request_digest(
     tool_name: str,
     args: Dict[str, Any],
     action_class: ActionClass,
-    contract_id: UUID,
     contract_version: int,
     task_id: UUID,
     idempotency_key: Optional[str] = None,
+    contract_id: Optional[UUID] = None,
 ) -> str:
-    """Computes deterministic SHA-256 over the authority-relevant tool request."""
+    """Compute SHA-256 over all authority-relevant request fields."""
     canonical_payload = {
         "action_class": action_class.value,
         "args": args,
-        "contract_id": str(contract_id),
+        "contract_id": str(contract_id) if contract_id else "",
         "contract_version": contract_version,
         "idempotency_key": idempotency_key or "",
         "task_id": str(task_id),
@@ -103,19 +95,19 @@ class CapabilityToken(BaseModel):
     token_id: UUID = Field(default_factory=uuid4, description="Unique capability token ID")
     project_id: UUID = Field(..., description="Project bounding this token")
     task_id: UUID = Field(..., description="Specific task authorized to use this token")
-    contract_id: UUID = Field(..., description="Exact Alignment Contract authorized by this token")
+    contract_id: Optional[UUID] = Field(
+        None,
+        description="Exact Alignment Contract authorized by this token; required at ToolGateway",
+    )
     contract_version: int = Field(..., description="Contract version in effect when issued")
     action_class: ActionClass = Field(..., description="Maximum action class authorized (A0-A2)")
     target_resource: str = Field(..., description="Exact resource/path pattern authorized")
     allowed_operations: List[str] = Field(..., description="Allowed operations (e.g. ['read', 'write', 'commit'])")
     request_digest: Optional[str] = Field(None, description="SHA-256 digest of canonical tool request")
     idempotency_key: Optional[str] = Field(None, description="Bound idempotency key")
-    issued_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
-        description="UTC issue timestamp",
-    )
-    expires_at: datetime = Field(..., description="UTC expiration timestamp")
-    signature: str = Field(..., description="HMAC-SHA256 signature validating token authenticity")
+    issued_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    expires_at: datetime
+    signature: str
 
     def is_expired(self, current_time: Optional[datetime] = None) -> bool:
         now = current_time or datetime.now(timezone.utc)
@@ -127,19 +119,16 @@ class RollbackGrant(BaseModel):
 
     model_config = {"frozen": True, "extra": "forbid"}
 
-    grant_id: UUID = Field(default_factory=uuid4, description="Unique rollback grant ID")
-    project_id: UUID = Field(..., description="Project bounding this grant")
-    task_id: UUID = Field(..., description="Specific task bounding this grant")
-    action_id: UUID = Field(..., description="Original action authorized to roll back")
-    tool_name: str = Field(..., description="Target tool to roll back")
-    target_resource: str = Field(..., description="Resource authorized for rollback")
-    pre_state_hash: Optional[str] = Field(None, description="Expected pre-mutation hash to restore")
-    issued_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
-        description="UTC issue timestamp",
-    )
-    expires_at: datetime = Field(..., description="UTC expiration timestamp")
-    signature: str = Field(..., description="HMAC-SHA256 signature validating grant authenticity")
+    grant_id: UUID = Field(default_factory=uuid4)
+    project_id: UUID
+    task_id: UUID
+    action_id: UUID
+    tool_name: str
+    target_resource: str
+    pre_state_hash: Optional[str] = None
+    issued_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    expires_at: datetime
+    signature: str
 
     def is_expired(self, current_time: Optional[datetime] = None) -> bool:
         now = current_time or datetime.now(timezone.utc)
@@ -157,7 +146,6 @@ class CapabilityService:
         token_id: UUID,
         project_id: UUID,
         task_id: UUID,
-        contract_id: UUID,
         contract_version: int,
         action_class: ActionClass,
         target_resource: str,
@@ -166,12 +154,12 @@ class CapabilityService:
         expires_at: datetime,
         request_digest: Optional[str] = None,
         idempotency_key: Optional[str] = None,
+        contract_id: Optional[UUID] = None,
     ) -> str:
-        """Generates deterministic HMAC-SHA256 digest over token parameters."""
         canonical_data = {
             "action_class": action_class.value,
             "allowed_operations": sorted(allowed_operations),
-            "contract_id": str(contract_id),
+            "contract_id": str(contract_id) if contract_id else "",
             "contract_version": contract_version,
             "expires_at": expires_at.isoformat(timespec="microseconds") + "Z",
             "idempotency_key": idempotency_key or "",
@@ -215,7 +203,6 @@ class CapabilityService:
         self,
         project_id: UUID,
         task_id: UUID,
-        contract_id: UUID,
         contract_version: int,
         action_class: ActionClass,
         target_resource: str,
@@ -224,12 +211,9 @@ class CapabilityService:
         issued_by_operator: bool = False,
         request_digest: Optional[str] = None,
         idempotency_key: Optional[str] = None,
+        contract_id: Optional[UUID] = None,
     ) -> CapabilityToken:
-        """
-        Issue a new capability token.
-        Enforces ALN-008: A2 actions require fresh explicit operator authorization.
-        Enforces ALN-018: A3 prohibited actions can never be issued.
-        """
+        """Issue a scoped token; ToolGateway requires contract-bound tokens."""
         if action_class == ActionClass.A3:
             raise CapabilityDeniedError("A3 actions are strictly prohibited and cannot be issued a capability token.")
 
@@ -284,7 +268,6 @@ class CapabilityService:
         pre_state_hash: Optional[str] = None,
         ttl_seconds: int = 86400,
     ) -> RollbackGrant:
-        """Issues an explicit RollbackGrant bound to the action and target state."""
         now = datetime.now(timezone.utc)
         expires_at = datetime.fromtimestamp(now.timestamp() + ttl_seconds, tz=timezone.utc)
         grant_id = uuid4()
@@ -319,20 +302,15 @@ class CapabilityService:
         token: CapabilityToken,
         target_resource: str,
         required_operation: str,
-        current_contract_id: UUID,
         current_contract_version: int,
         current_time: Optional[datetime] = None,
         expected_request_digest: Optional[str] = None,
+        current_contract_id: Optional[UUID] = None,
         required_action_class: Optional[ActionClass] = None,
         expected_project_id: Optional[UUID] = None,
         expected_task_id: Optional[UUID] = None,
     ) -> bool:
-        """Validate signature plus all supplied authority dimensions.
-
-        ``contract_id`` and ``contract_version`` are mandatory because a token
-        issued for one contract must never become valid merely because another
-        contract happens to share the same version number.
-        """
+        """Validate signature plus every authority dimension supplied by the caller."""
         expected_sig = self._compute_signature(
             token_id=token.token_id,
             project_id=token.project_id,
@@ -354,10 +332,15 @@ class CapabilityService:
         if token.is_expired(current_time):
             raise CapabilityDeniedError(f"Capability token expired at {token.expires_at.isoformat()}.")
 
-        if token.contract_id != current_contract_id:
-            raise CapabilityDeniedError(
-                f"Capability token contract ({token.contract_id}) does not match active contract ({current_contract_id})."
-            )
+        if current_contract_id is not None:
+            if token.contract_id is None:
+                raise CapabilityDeniedError(
+                    "Capability token is not bound to a contract identity and cannot cross ToolGateway."
+                )
+            if token.contract_id != current_contract_id:
+                raise CapabilityDeniedError(
+                    f"Capability token contract ({token.contract_id}) does not match active contract ({current_contract_id})."
+                )
 
         if token.contract_version != current_contract_version:
             raise CapabilityDeniedError(
@@ -410,7 +393,6 @@ class CapabilityService:
         target_resource: str,
         current_time: Optional[datetime] = None,
     ) -> bool:
-        """Validates a RollbackGrant signature, expiry, tool, and target scope."""
         expected_sig = self._compute_rollback_signature(
             grant_id=grant.grant_id,
             project_id=grant.project_id,

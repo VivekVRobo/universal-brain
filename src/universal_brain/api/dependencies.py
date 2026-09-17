@@ -113,7 +113,13 @@ class RuntimeContainer:
             self._recovery_manager = StartupRecoveryManager(self.db_manager, self.event_store)
         return self._recovery_manager
 
+    def rehydrate_runtime_projections(self) -> None:
+        """Replay all runtime projections after canonical history changes."""
+        self.action_manager.rehydrate_from_events()
+        self.job_queue.rehydrate_from_events()
+
     def mark_recovery_complete(self, report: dict[str, Any]) -> None:
+        self.rehydrate_runtime_projections()
         self._recovery_completed = report.get("system_status") == "READY"
         self._recovery_report = dict(report)
 

@@ -119,6 +119,7 @@ class RuntimeContainer:
         self.job_queue.rehydrate_from_events()
 
     def mark_recovery_complete(self, report: dict[str, Any]) -> None:
+        self.job_queue.kernel_epoch = int(report.get("kernel_epoch", 1))
         self.rehydrate_runtime_projections()
         self._recovery_completed = report.get("system_status") == "READY"
         self._recovery_report = dict(report)

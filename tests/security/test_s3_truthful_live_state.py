@@ -137,6 +137,8 @@ def test_production_control_plane_contains_no_demo_truth_claims():
         root / "console/src/components/ExecutiveStream.tsx",
         root / "console/src/components/GovernanceView.tsx",
         root / "console/src/components/Header.tsx",
+        root / "console/src/components/EventGraphExplorer.tsx",
+        root / "console/src/components/A2ApprovalModal.tsx",
     ]
     forbidden = [
         "Humanoid Robot Controller",
@@ -145,6 +147,9 @@ def test_production_control_plane_contains_no_demo_truth_claims():
         "ALL PASSING",
         "200,000",
         "00000000-0000-0000-0000-000000000001",
+        "CRYPTOGRAPHICALLY VERIFIED",
+        "ADR-0008 PASS",
+        "\"nonce-\" + action.action_id",
     ]
 
     for path in production_surfaces:

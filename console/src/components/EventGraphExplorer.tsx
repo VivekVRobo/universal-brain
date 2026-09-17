@@ -89,7 +89,7 @@ export const EventGraphExplorer: React.FC = () => {
 
         {/* DAG Nodes Display */}
         <div className="dag-canvas" style={{ padding: "24px", overflowY: "auto", display: "flex", flexDirection: "column", gap: "20px" }}>
-          {graph?.nodes.map((node, idx) => {
+          {graph?.nodes.map((node) => {
             const isSelected = selectedNode?.id === node.id;
             const isCausalPath = causalPathNodeIds.has(node.id);
 
@@ -146,13 +146,6 @@ export const EventGraphExplorer: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Edge Connector indicator */}
-                {idx < (graph?.nodes.length || 0) - 1 && (
-                  <div style={{ display: "flex", alignItems: "center", gap: "6px", color: "var(--accent-violet)", fontSize: "0.75rem", fontFamily: "var(--font-mono)" }}>
-                    <GitBranch size={16} />
-                    <span>CAUSED_BY</span>
-                  </div>
-                )}
               </div>
             );
           })}
@@ -191,7 +184,7 @@ export const EventGraphExplorer: React.FC = () => {
 
             <div className="inspector-section">
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <span className="inspector-label">SHA-256 Merkle Hash (ALN-016)</span>
+                <span className="inspector-label">SHA-256 Event Hash (ALN-016)</span>
                 <button
                   onClick={handleCopyHash}
                   style={{ background: "transparent", border: "none", color: "var(--text-secondary)", cursor: "pointer" }}

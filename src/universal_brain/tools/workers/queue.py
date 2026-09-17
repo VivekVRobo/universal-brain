@@ -224,6 +224,23 @@ class EphemeralJobQueue:
 
         return reaped
 
+    def cancel_job(self, job_id: UUID) -> bool:
+        """Cancel a non-terminal job and fence any active lease."""
+        job = self._jobs.get(job_id)
+        if job is None:
+            return False
+        if job.status in {
+            JobStatus.COMPLETED,
+            JobStatus.CANCELLED,
+            JobStatus.REJECTED_RESULT,
+        }:
+            return False
+        if job.current_lease is not None:
+            job.current_lease.is_fenced = True
+        job.status = JobStatus.CANCELLED
+        job.completed_at = datetime.now(timezone.utc)
+        return True
+
     def complete_job(
         self,
         job_id: UUID,

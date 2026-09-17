@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "models": [
+    {
+      "model_key": "frontier/example",
+      "vendor": "operator-configured",
+      "model_id": "verify-current-model-id",
+      "display_name": "Frontier Model Example",
+      "family": "frontier",
+      "context_window": 1000000,
+      "max_output_tokens": 65536,
+      "capability_profile": {
+        "scores": {
+          "reasoning": 0.95,
+          "coding": 0.95,
+          "architecture": 0.95,
+          "verification": 0.9,
+          "tool_use": 0.9,
+          "computer_use": 0.85
+        }
+      },
+      "metadata": {
+        "scores_are_routing_hints": true,
+        "operator_note": "Replace static hints with local benchmark/evaluation evidence over time."
+      },
+      "enabled": true
+    }
+  ],
+  "routes": [
+    {
+      "route_id": "frontier-api-example",
+      "model_key": "frontier/example",
+      "transport": "api",
+      "auth_mode": "api_key",
+      "retention_policy": "unknown",
+      "max_sensitivity": "public",
+      "cost_per_million_input": 0.0,
+      "cost_per_million_output": 0.0,
+      "supports_structured_outputs": true,
+      "supports_tools": true,
+      "supports_vision": false,
+      "config": {
+        "api_key_env": "FRONTIER_API_KEY",
+        "quota": {
+          "window_seconds": 60,
+          "max_requests": 10,
+          "default_rate_limit_cooldown_seconds": 60
+        },
+        "operator_note": "Example only. Verify current model, pricing, retention, quota, and terms before enabling."
+      },
+      "enabled": false
+    },
+    {
+      "route_id": "frontier-browser-example",
+      "model_key": "frontier/example",
+      "transport": "browser",
+      "auth_mode": "user_session",
+      "retention_policy": "provider_default",
+      "max_sensitivity": "internal",
+      "supports_structured_outputs": false,
+      "supports_tools": false,
+      "supports_vision": true,
+      "config": {
+        "driver": "playwright_chat_ui",
+        "target_url": "https://provider.example/",
+        "user_data_dir": ".universal_brain/browser_profiles/frontier-example",
+        "prompt_selectors": ["REPLACE_WITH_ACCESSIBILITY_OR_DOM_SELECTOR"],
+        "response_selectors": ["REPLACE_WITH_RESPONSE_SELECTOR"],
+        "submit_selectors": ["REPLACE_WITH_SUBMIT_SELECTOR"],
+        "login_url_fragments": ["login", "signin"],
+        "auth_required_selectors": ["REPLACE_WITH_AUTH_REQUIRED_SELECTOR"],
+        "attachment_input_selectors": ["input[type=file]"],
+        "allowed_upload_roots": ["./workspace"],
+        "artifact_dir": ".universal_brain/evidence/browser",
+        "operator_note": "Use an already-authorized operator profile. No CAPTCHA/MFA/credential automation is supported."
+      },
+      "enabled": false
+    },
+    {
+      "route_id": "frontier-desktop-example",
+      "model_key": "frontier/example",
+      "transport": "desktop_app",
+      "auth_mode": "user_session",
+      "retention_policy": "provider_default",
+      "max_sensitivity": "internal",
+      "supports_structured_outputs": false,
+      "supports_tools": false,
+      "supports_vision": false,
+      "config": {
+        "driver": "windows_uia_chat",
+        "title_re": ".*REPLACE_WITH_APP_WINDOW_TITLE.*",
+        "prompt_control_type": "Edit",
+        "prompt_auto_id": "REPLACE_WITH_PROMPT_AUTO_ID",
+        "response_control_type": "Text",
+        "response_auto_id": "REPLACE_WITH_RESPONSE_AUTO_ID",
+        "submit_control_type": "Button",
+        "submit_auto_id": "REPLACE_WITH_SUBMIT_AUTO_ID",
+        "artifact_dir": ".universal_brain/evidence/desktop",
+        "operator_note": "Windows UI Automation route; target app must already be installed, running, and authenticated by the operator."
+      },
+      "enabled": false
+    }
+  ]
+}

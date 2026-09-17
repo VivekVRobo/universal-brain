@@ -1,0 +1,74 @@
+{
+  "checkpoint": "V5.2",
+  "checks": [
+    {
+      "check_id": "platform",
+      "details": {
+        "machine": "x86_64",
+        "python_executable": "/opt/pyvenv/bin/python"
+      },
+      "evidence_refs": [],
+      "status": "pass",
+      "summary": "Linux 6.18.35 / Python 3.13.5"
+    },
+    {
+      "check_id": "tree_sitter",
+      "details": {
+        "reason": "Tree-sitter semantic provider requires optional dependency tree-sitter-language-pack"
+      },
+      "evidence_refs": [],
+      "status": "skip",
+      "summary": "Tree-sitter optional runtime is not installed"
+    },
+    {
+      "check_id": "lsp",
+      "details": {},
+      "evidence_refs": [],
+      "status": "skip",
+      "summary": "No operator-authorized language-server command supplied"
+    },
+    {
+      "check_id": "wsl2",
+      "details": {},
+      "evidence_refs": [],
+      "status": "skip",
+      "summary": "WSL2 target evidence requires Windows"
+    },
+    {
+      "check_id": "hyperv",
+      "details": {},
+      "evidence_refs": [],
+      "status": "skip",
+      "summary": "Hyper-V target evidence requires Windows"
+    },
+    {
+      "check_id": "distributed_leases",
+      "details": {
+        "generations": [
+          1,
+          2,
+          3,
+          4
+        ]
+      },
+      "evidence_refs": [],
+      "status": "pass",
+      "summary": "Generation-fenced durable lease reacquisition succeeded"
+    },
+    {
+      "check_id": "multi_hour_endurance",
+      "details": {},
+      "evidence_refs": [],
+      "status": "skip",
+      "summary": "No operator-produced endurance record supplied"
+    }
+  ],
+  "created_at": "2026-09-08T11:40:14.057734Z",
+  "overall_status": "partial",
+  "platform": "Linux",
+  "platform_release": "6.18.35",
+  "python_version": "3.13.5",
+  "report_sha256": "2bafe79d7325fdb9935d47bfef23a1a330e3535837c19f9e22c4e56bbe9b8a2f",
+  "schema_version": "ub-engineering-evidence/v1",
+  "workspace": "/mnt/data/ub_v52_work"
+}

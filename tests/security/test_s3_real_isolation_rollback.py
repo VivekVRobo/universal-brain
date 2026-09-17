@@ -11,6 +11,7 @@ from universal_brain.alignment.contract import (
     AcceptanceCriterion,
     ActionClass,
     AlignmentContract,
+    ContractStatus,
     OriginalInput,
     PermissionsCeiling,
     Requirement,
@@ -155,6 +156,104 @@ def test_gateway_records_file_rollback_only_after_sha256_parity(tmp_path: Path):
     ]
     assert len(rollback_events) == 1
     assert rollback_events[0].payload["rollback_verified"] is True
+
+
+def test_signed_rollback_grant_recovers_after_forward_contract_closes(tmp_path: Path):
+    contract = _active_contract()
+    project_id = uuid4()
+    task_id = uuid4()
+    target = tmp_path / "recover.txt"
+    target.write_text("before", encoding="utf-8")
+    pre_hash = hash_file(target)
+
+    manager = WorkspaceTransactionManager(tmp_path, project_id, task_id)
+    tool = FileWriteTool(manager)
+    capabilities = CapabilityService()
+    store = EventStore()
+    gateway = ToolGateway(store, capabilities)
+    gateway.register_tool(tool)
+
+    forward_token = capabilities.issue_token(
+        project_id=project_id,
+        task_id=task_id,
+        contract_id=contract.contract_id,
+        contract_version=contract.version,
+        action_class=ActionClass.A1,
+        target_resource="recover.txt",
+        allowed_operations=["write_file"],
+    )
+    result = gateway.execute_tool(
+        tool_name="write_file",
+        args={"target": "recover.txt", "content": "after"},
+        capability_token=forward_token,
+        contract=contract,
+        target_resource="recover.txt",
+    )
+    assert result.success is True
+
+    grant = capabilities.issue_rollback_grant(
+        project_id=project_id,
+        task_id=task_id,
+        action_id=uuid4(),
+        tool_name="write_file",
+        target_resource="recover.txt",
+        pre_state_hash=pre_hash,
+    )
+    closed_contract = contract.model_copy(update={"status": ContractStatus.CLOSED})
+
+    assert gateway.rollback_tool(
+        tool_name="write_file",
+        rollback_data=result.rollback_data or {},
+        capability_token=grant,
+        contract=closed_contract,
+    ) is True
+    assert hash_file(target) == pre_hash
+
+
+def test_rollback_grant_pre_state_hash_must_match_checkpoint(tmp_path: Path):
+    contract = _active_contract()
+    project_id = uuid4()
+    task_id = uuid4()
+    target = tmp_path / "bound.txt"
+    target.write_text("before", encoding="utf-8")
+
+    manager = WorkspaceTransactionManager(tmp_path, project_id, task_id)
+    tool = FileWriteTool(manager)
+    capabilities = CapabilityService()
+    gateway = ToolGateway(EventStore(), capabilities)
+    gateway.register_tool(tool)
+
+    forward_token = capabilities.issue_token(
+        project_id=project_id,
+        task_id=task_id,
+        contract_id=contract.contract_id,
+        contract_version=contract.version,
+        action_class=ActionClass.A1,
+        target_resource="bound.txt",
+        allowed_operations=["write_file"],
+    )
+    result = gateway.execute_tool(
+        tool_name="write_file",
+        args={"target": "bound.txt", "content": "after"},
+        capability_token=forward_token,
+        contract=contract,
+        target_resource="bound.txt",
+    )
+    forged_scope_grant = capabilities.issue_rollback_grant(
+        project_id=project_id,
+        task_id=task_id,
+        action_id=uuid4(),
+        tool_name="write_file",
+        target_resource="bound.txt",
+        pre_state_hash="0" * 64,
+    )
+    with pytest.raises(Exception, match="pre-state hash"):
+        gateway.rollback_tool(
+            tool_name="write_file",
+            rollback_data=result.rollback_data or {},
+            capability_token=forged_scope_grant,
+            contract=contract,
+        )
 
 
 def test_command_runner_requires_real_compensation_and_separate_verification(tmp_path: Path):

@@ -203,10 +203,9 @@ export const EventGraphExplorer: React.FC = () => {
             </div>
 
             <div className="inspector-section">
-              <span className="inspector-label">Integrity Status</span>
-              <div style={{ display: "flex", alignItems: "center", gap: "6px", color: "var(--accent-emerald)", fontFamily: "var(--font-mono)", fontSize: "0.78rem" }}>
-                <ShieldCheck size={14} />
-                <span>CRYPTOGRAPHICALLY VERIFIED ✓</span>
+              <span className="inspector-label">Integrity Evidence</span>
+              <div style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: "0.78rem" }}>
+                Hash recorded in canonical event envelope. Full-chain verification is reported separately under Governance (ALN-016).
               </div>
             </div>
 

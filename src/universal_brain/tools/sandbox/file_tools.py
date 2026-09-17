@@ -114,6 +114,16 @@ class FileWriteTool(BaseTool):
         checkpoint = WorkspaceCheckpoint.model_validate(cp_data)
         return self.tx_manager.rollback_checkpoint(checkpoint)
 
+    def verify_rollback(self, rollback_data: Dict[str, Any]) -> bool:
+        cp_data = rollback_data.get("checkpoint")
+        if not cp_data:
+            return False
+        try:
+            checkpoint = WorkspaceCheckpoint.model_validate(cp_data)
+        except Exception:
+            return False
+        return self.tx_manager.verify_checkpoint_restored(checkpoint)
+
 
 class FilePatchTool(BaseTool):
     """Line-oriented diff patch tool with dry-run reversibility (ActionClass A1)."""
@@ -166,6 +176,16 @@ class FilePatchTool(BaseTool):
         checkpoint = WorkspaceCheckpoint.model_validate(cp_data)
         return self.tx_manager.rollback_checkpoint(checkpoint)
 
+    def verify_rollback(self, rollback_data: Dict[str, Any]) -> bool:
+        cp_data = rollback_data.get("checkpoint")
+        if not cp_data:
+            return False
+        try:
+            checkpoint = WorkspaceCheckpoint.model_validate(cp_data)
+        except Exception:
+            return False
+        return self.tx_manager.verify_checkpoint_restored(checkpoint)
+
 
 class FileDeleteTool(BaseTool):
     """File deletion with safe tombstone backup for micro-reversibility (ActionClass A1)."""
@@ -214,3 +234,13 @@ class FileDeleteTool(BaseTool):
             return False
         checkpoint = WorkspaceCheckpoint.model_validate(cp_data)
         return self.tx_manager.rollback_checkpoint(checkpoint)
+
+    def verify_rollback(self, rollback_data: Dict[str, Any]) -> bool:
+        cp_data = rollback_data.get("checkpoint")
+        if not cp_data:
+            return False
+        try:
+            checkpoint = WorkspaceCheckpoint.model_validate(cp_data)
+        except Exception:
+            return False
+        return self.tx_manager.verify_checkpoint_restored(checkpoint)

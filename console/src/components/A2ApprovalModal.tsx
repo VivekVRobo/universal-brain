@@ -42,9 +42,12 @@ export const A2ApprovalModal: React.FC<A2ApprovalModalProps> = ({ action, onClos
       const res = await ApiClient.approveAction({
         action_id: action.action_id,
         proposal_version: action.proposal_version,
-        operator_id: "operator-primary",
+        // Backward-compatible request field only; the server derives canonical
+        // identity from the authenticated operator principal.
+        operator_id: "authenticated-operator",
         authorization_digest: action.authorization_digest,
-        nonce: (action as any).nonce || "nonce-" + action.action_id.substring(0, 8),
+        nonce: action.nonce,
+        approved_at: action.authorization_approved_at,
       });
       setSuccessMessage(`Action Approved! Capability Token issued: ${res.capability_token_id}`);
       setTimeout(() => {
@@ -65,8 +68,8 @@ export const A2ApprovalModal: React.FC<A2ApprovalModalProps> = ({ action, onClos
       await ApiClient.rejectAction({
         action_id: action.action_id,
         proposal_version: action.proposal_version,
-        operator_id: "operator-primary",
-        reason: "Operator denied hardware bringup at this stage.",
+        operator_id: "authenticated-operator",
+        reason: "Operator rejected the proposed action.",
       });
       setSuccessMessage("Action Rejected. Rollback was not executed because state was unmutated.");
       setTimeout(() => {
@@ -89,7 +92,7 @@ export const A2ApprovalModal: React.FC<A2ApprovalModalProps> = ({ action, onClos
         <div className="modal-header">
           <div className="modal-title-box">
             <AlertTriangle size={22} color="var(--accent-crimson)" />
-            <span>ACTION APPROVAL REQUIRED (Action Class: A2 Consequential)</span>
+            <span>ACTION APPROVAL REQUIRED (Action Class: {action.action_class})</span>
           </div>
           <div className="countdown-timer">
             <Clock size={14} style={{ display: "inline", marginRight: "4px" }} />
@@ -130,7 +133,7 @@ export const A2ApprovalModal: React.FC<A2ApprovalModalProps> = ({ action, onClos
 
             <span className="spec-label">Preflight Reversibility:</span>
             <span className="spec-val" style={{ color: "var(--accent-emerald)" }}>
-              {action.preflight_reversibility} (ADR-0008 PASS)
+              {action.preflight_reversibility}
             </span>
 
             <span className="spec-label">Proposal Version:</span>

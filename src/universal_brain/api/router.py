@@ -26,6 +26,13 @@ from universal_brain.alignment.contract import (
 from universal_brain.api.actions import ActionProposal, ActionStatus
 from universal_brain.api.dependencies import RuntimeContainer, get_container
 from universal_brain.api.redaction import redact_evidence_payload
+from universal_brain.api.read_models import (
+    evaluate_runtime_invariants,
+    latest_active_contract,
+    latest_model_identity,
+    observed_contract_version,
+    project_observations,
+)
 from universal_brain.api.schemas import (
     ActionApproveRequest,
     ActionCancelRequest,
@@ -68,7 +75,7 @@ router = APIRouter(prefix="/api/v1")
 
 @router.get("/runtime/health", response_model=RuntimeHealthResponse)
 async def get_runtime_health(container: RuntimeContainer = Depends(get_container)) -> RuntimeHealthResponse:
-    """Exposes real aggregate node capacity, health, and spend metrics."""
+    """Expose only health and runtime-state values that are actually observable."""
     disk = container.retention_manager.check_disk_capacity()
     tier = container.budget_gatekeeper.get_tier()
 
@@ -78,11 +85,18 @@ async def get_runtime_health(container: RuntimeContainer = Depends(get_container
     if disk.is_critical or tier.value == "TIER_3":
         node_status = "CRITICAL"
 
+    # A production/staging process without materialized persistence must not
+    # advertise itself as fully LIVE.
+    if settings.app_env in {"production", "staging"} and not container.persistence_initialized:
+        if node_status == "HEALTHY":
+            node_status = "DEGRADED"
+
     pending_actions = len([
         p for p in container.action_manager.list_proposals()
         if p.status == ActionStatus.AWAITING_APPROVAL
     ])
 
+    is_live = settings.app_env == "production" and container.persistence_initialized
     return RuntimeHealthResponse(
         node_id=settings.system_id,
         status=node_status,
@@ -92,13 +106,12 @@ async def get_runtime_health(container: RuntimeContainer = Depends(get_container
         budget_spend_usd=container.budget_gatekeeper.cumulative_spend_usd,
         monthly_budget_usd=container.budget_gatekeeper.monthly_budget_usd,
         budget_tier=tier,
-        active_model_lease="claude-3-5-sonnet",
-        lease_expires_in_seconds=1840,
+        active_model_lease=latest_model_identity(container.event_store),
+        lease_expires_in_seconds=None,
         active_actions_count=pending_actions,
-        contract_version=1,
-        system_mode="LIVE" if settings.app_env == "production" else "LOCAL",
+        contract_version=observed_contract_version(container.event_store),
+        system_mode="LIVE" if is_live else "LOCAL",
     )
-
 
 @router.get("/intelligence/status", response_model=IntelligenceStatusResponse)
 async def get_intelligence_status(
@@ -132,25 +145,45 @@ async def get_engineering_status(
 
 @router.get("/projects", response_model=List[ProjectSummaryResponse])
 async def list_projects(container: RuntimeContainer = Depends(get_container)) -> List[ProjectSummaryResponse]:
-    """List active projects and contract statuses."""
-    # Sovereign baseline project
-    p_id = UUID("00000000-0000-0000-0000-000000000001")
-    pending = len([
-        p for p in container.action_manager.list_proposals()
-        if p.status == ActionStatus.AWAITING_APPROVAL
-    ])
-    return [
-        ProjectSummaryResponse(
-            project_id=p_id,
-            title="Humanoid Robot Controller (ROS 2 Humble)",
-            status="active",
-            current_contract_version=1,
-            created_at=datetime.now(timezone.utc),
-            active_tasks_count=3,
-            pending_actions_count=pending,
-        )
-    ]
+    """List projects actually observed in canonical runtime state."""
+    observations = project_observations(container.event_store)
+    proposals = container.action_manager.list_proposals()
 
+    # Consequential proposals are canonical state too; include their project even
+    # if the current in-memory EventStore has not observed another project event.
+    for proposal in proposals:
+        if proposal.project_id not in observations:
+            observations[proposal.project_id] = {
+                "title": f"Project {str(proposal.project_id)[:8]}",
+                "status": "observed",
+                "current_contract_version": proposal.contract_version,
+                "created_at": proposal.created_at,
+                "observed_task_assignments": None,
+            }
+
+    responses: List[ProjectSummaryResponse] = []
+    for project_id, observed in sorted(
+        observations.items(), key=lambda item: item[1]["created_at"]
+    ):
+        pending = sum(
+            1
+            for proposal in proposals
+            if proposal.project_id == project_id
+            and proposal.status == ActionStatus.AWAITING_APPROVAL
+        )
+        responses.append(
+            ProjectSummaryResponse(
+                project_id=project_id,
+                title=observed["title"],
+                status=observed["status"],
+                current_contract_version=observed["current_contract_version"],
+                created_at=observed["created_at"],
+                # EventStore currently proves assignment, not task liveness.
+                active_tasks_count=None,
+                pending_actions_count=pending,
+            )
+        )
+    return responses
 
 @router.get("/events", response_model=EventListResponse)
 async def query_events(
@@ -238,120 +271,41 @@ async def get_causal_graph(
 async def get_current_contract(
     container: RuntimeContainer = Depends(get_container),
 ) -> ContractDetailResponse:
-    """Fetch current active Alignment Contract with requirement counts."""
-    # Deterministic baseline contract representation
-    return ContractDetailResponse(
-        contract_id=UUID("00000000-0000-0000-0000-000000000010"),
-        version=1,
-        status="active",
-        objective="Design, verify, and deploy a ROS 2 Humble Humanoid PID Controller",
-        requirements_count=4,
-        constraints_count=2,
-        permissions_ceiling=ActionClass.A2,
-        created_at=datetime.now(timezone.utc),
-        semantic_diffs=[
-            ContractDiffItem(
-                diff_type="ADDED",
-                category="REQUIREMENT",
-                item_id="REQ-001",
-                summary="Must compile under colcon with zero warnings",
-            ),
-            ContractDiffItem(
-                diff_type="ADDED",
-                category="CONSTRAINT",
-                item_id="C-001",
-                summary="Direct physical motor actuators require A2 operator authorization (ALN-018)",
-            ),
-        ],
-    )
+    """Return the latest fully materialized active contract, or 404 if absent."""
+    resolved = latest_active_contract(container.event_store)
+    if resolved is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No active Alignment Contract is present in canonical runtime state.",
+        )
 
+    contract, observed_at = resolved
+    return ContractDetailResponse(
+        contract_id=contract.contract_id,
+        version=contract.version,
+        status=contract.status.value,
+        objective=contract.objective,
+        requirements_count=len(contract.requirements),
+        constraints_count=len(contract.constraints),
+        permissions_ceiling=contract.permissions.action_ceiling,
+        created_at=observed_at,
+        # Semantic diffs require persisted diff artifacts. Do not synthesize them.
+        semantic_diffs=[],
+    )
 
 @router.get("/invariants", response_model=InvariantLedgerResponse)
-async def get_invariants_matrix() -> InvariantLedgerResponse:
-    """Evaluates the 21 alignment invariants matrix (ALN-001 to ALN-021)."""
-    now = datetime.now(timezone.utc)
-    invariants: List[InvariantItem] = [
-        InvariantItem(
-            invariant_id="ALN-001",
-            name="Requirement Provenance",
-            description="Tasks must cite at least one input requirement",
-            status="PASS",
-            proofs_count=8,
-            last_evaluated_at=now,
-        ),
-        InvariantItem(
-            invariant_id="ALN-004a",
-            name="Deterministic Ambiguity Taxonomy",
-            description="High-impact ambiguity blocks branch; classifier is deterministic",
-            status="PASS",
-            proofs_count=12,
-            last_evaluated_at=now,
-        ),
-        InvariantItem(
-            invariant_id="ALN-006",
-            name="Constraint Preservation Gate",
-            description="Explicit constraints cannot be silently weakened",
-            status="PASS",
-            proofs_count=5,
-            last_evaluated_at=now,
-        ),
-        InvariantItem(
-            invariant_id="ALN-008",
-            name="A2 Fresh Approval Gate",
-            description="Consequential actions require fresh target-specific capability tokens",
-            status="PASS",
-            proofs_count=4,
-            last_evaluated_at=now,
-        ),
-        InvariantItem(
-            invariant_id="ALN-010",
-            name="Completion Evidence Rule",
-            description="Completion requires acceptance criteria and deterministic proof",
-            status="PASS",
-            proofs_count=14,
-            last_evaluated_at=now,
-        ),
-        InvariantItem(
-            invariant_id="ALN-014",
-            name="Health Gatekeeper",
-            description="Failed health/storage disables state-changing writes",
-            status="PASS",
-            proofs_count=3,
-            last_evaluated_at=now,
-        ),
-        InvariantItem(
-            invariant_id="ALN-016",
-            name="Tamper-Evident Hash Chain",
-            description="State-changing events form an unbroken SHA-256 Merkle chain",
-            status="PASS",
-            proofs_count=22,
-            last_evaluated_at=now,
-        ),
-        InvariantItem(
-            invariant_id="ALN-018",
-            name="Actuator Deny Rule",
-            description="Version 1 prohibits autonomous physical actuator control",
-            status="PASS",
-            proofs_count=1,
-            last_evaluated_at=now,
-        ),
-        InvariantItem(
-            invariant_id="ALN-021",
-            name="Total Awareness Causal DAG",
-            description="Complete causal lineage preserved across all state changes",
-            status="PASS",
-            proofs_count=18,
-            last_evaluated_at=now,
-        ),
-    ]
-
+async def get_invariants_matrix(
+    container: RuntimeContainer = Depends(get_container),
+) -> InvariantLedgerResponse:
+    """Report runtime-proven invariant status; unproven checks remain UNKNOWN."""
+    invariants = evaluate_runtime_invariants(container.event_store)
     return InvariantLedgerResponse(
         invariants=invariants,
-        pass_count=len(invariants),
-        warn_count=0,
-        fail_count=0,
+        pass_count=sum(item.status == "PASS" for item in invariants),
+        warn_count=sum(item.status == "WARN" for item in invariants),
+        fail_count=sum(item.status == "FAIL" for item in invariants),
+        unknown_count=sum(item.status == "UNKNOWN" for item in invariants),
     )
-
 
 @router.get("/actions/pending", response_model=List[ActionProposalResponse])
 async def list_pending_actions(
@@ -423,29 +377,43 @@ async def submit_operator_command(
     idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
     container: RuntimeContainer = Depends(get_container),
 ) -> Dict[str, Any]:
-    """
-    Submits a human operator prompt or instruction.
-    Records canonical USER_INPUT event and broadcasts to subscribers.
-    """
+    """Record an operator command and the real contract derived from it."""
+    project_id = req.project_id or uuid4()
     event = container.event_store.append_event(
         event_type=EventType.USER_INPUT,
-        actor_id="operator",
+        actor_id=settings.operator_id,
         payload={"utterance": req.prompt},
-        project_id=req.project_id,
+        project_id=project_id,
     )
 
-    # Executive Intent Comprehension (Milestone M3/M4)
     parser = IntentParser(container.alignment_engine)
-    intent = parser.parse_intent(req.prompt, project_id=req.project_id, source_event_id=event.event_id)
+    intent = parser.parse_intent(
+        req.prompt,
+        project_id=project_id,
+        operator_id=settings.operator_id,
+        source_event_id=event.event_id,
+    )
     intent_event = container.event_store.append_event(
         event_type=EventType.INTENT_PARSED,
         actor_id="intent_parser",
         payload=intent.model_dump(mode="json"),
-        project_id=req.project_id,
-        cause_event_ids=[event.event_id],
+        project_id=project_id,
+        caused_by_event_id=event.event_id,
     )
 
-    # Broadcast on WebSocket
+    contract = parser.propose_contract(intent)
+    contract_event = container.event_store.append_event(
+        event_type=EventType.CONTRACT_CREATED,
+        actor_id="alignment_engine",
+        payload={
+            "contract": contract.model_dump(mode="json"),
+            "intent_id": str(intent.intent_id),
+        },
+        project_id=project_id,
+        contract_version=contract.version,
+        caused_by_event_id=intent_event.event_id,
+    )
+
     await container.ws_gateway.broadcast(
         channel="events",
         event_type="USER_INPUT",
@@ -463,15 +431,28 @@ async def submit_operator_command(
         },
         event_id=intent_event.event_id,
     )
+    await container.ws_gateway.broadcast(
+        channel="governance",
+        event_type="CONTRACT_CREATED",
+        payload={
+            "event_id": str(contract_event.event_id),
+            "contract_id": str(contract.contract_id),
+            "version": contract.version,
+            "status": contract.status.value,
+        },
+        event_id=contract_event.event_id,
+    )
 
     return {
         "status": "ACCEPTED",
+        "project_id": str(project_id),
         "event_id": str(event.event_id),
         "event_hash": event.event_hash,
         "intent_id": str(intent.intent_id),
         "primary_goal": intent.primary_goal,
+        "contract_id": str(contract.contract_id),
+        "contract_version": contract.version,
     }
-
 
 @router.post("/actions/{action_id}/approve")
 async def approve_action(
@@ -505,7 +486,7 @@ async def approve_action(
             payload={
                 "action_id": str(action_id),
                 "token_id": str(token.token_id),
-                "operator_id": req.operator_id,
+                "operator_id": settings.operator_id,
             },
         )
 

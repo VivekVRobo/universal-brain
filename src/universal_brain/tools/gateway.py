@@ -287,8 +287,16 @@ class ToolGateway:
             task_id = capability_token.task_id
 
         success = tool.rollback(rollback_data)
+        verified = False
+        verification_error: str | None = None
 
         if success:
+            try:
+                verified = bool(tool.verify_rollback(rollback_data))
+            except Exception as exc:
+                verification_error = f"{type(exc).__name__}: {exc}"
+
+        if success and verified:
             rb_event = self.store.append_event(
                 event_type=EventType.ROLLBACK_EXECUTED,
                 actor_id=actor_id,
@@ -298,6 +306,7 @@ class ToolGateway:
                 payload={
                     "tool_name": tool_name,
                     "status": "ROLLBACK_COMPLETED",
+                    "rollback_verified": True,
                     "contract_id": str(contract.contract_id),
                     "rollback_data_keys": list(rollback_data.keys()),
                 },
@@ -311,6 +320,15 @@ class ToolGateway:
                 )
             return True
 
+        failure_status = "ROLLBACK_UNVERIFIED" if success else "ROLLBACK_FAILED"
+        failure_reason = (
+            verification_error
+            or (
+                "Tool rollback returned success but independent post-state verification failed."
+                if success
+                else "Tool rollback method returned False."
+            )
+        )
         self.store.append_event(
             event_type=EventType.SYSTEM_FAILURE,
             actor_id=actor_id,
@@ -319,9 +337,10 @@ class ToolGateway:
             contract_version=contract.version,
             payload={
                 "tool_name": tool_name,
-                "status": "ROLLBACK_FAILED",
+                "status": failure_status,
+                "rollback_verified": False,
                 "contract_id": str(contract.contract_id),
-                "error": "Tool rollback method returned False.",
+                "error": failure_reason,
             },
             caused_by_event_id=original_call_event_id,
         )

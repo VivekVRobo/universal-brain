@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 from universal_brain.kernel.events import ActionClass
 from universal_brain.tools.base import BaseTool, ReversibilityClass, ToolResult
 from universal_brain.tools.workers.queue import EphemeralJobQueue
+from universal_brain.tools.workers.schemas import JobStatus
 
 
 class CloudBatchDispatchTool(BaseTool):
@@ -55,18 +56,28 @@ class CloudBatchDispatchTool(BaseTool):
                 "payload_digest": job.payload_digest,
                 "status": job.status.value,
             },
+            rollback_data={"job_id": str(job.job_id)},
             reversibility_class=self.reversibility_class,
             post_digest=job.payload_digest,
         )
 
     def rollback(self, rollback_data: Dict[str, Any]) -> bool:
-        # Cancel or mark queued job cancelled
         job_id = rollback_data.get("job_id")
-        if job_id:
-            try:
-                job = self.job_queue._jobs.get(UUID(job_id))
-                if job:
-                    job.status = "CANCELLED"
-            except Exception:
-                pass
-        return True
+        if not job_id:
+            return False
+        try:
+            return self.job_queue.cancel_job(UUID(str(job_id)))
+        except (ValueError, TypeError):
+            return False
+
+    def verify_rollback(self, rollback_data: Dict[str, Any]) -> bool:
+        job_id = rollback_data.get("job_id")
+        if not job_id:
+            return False
+        try:
+            job = self.job_queue.get_job(UUID(str(job_id)))
+        except (ValueError, TypeError):
+            return False
+        if job is None or job.status != JobStatus.CANCELLED:
+            return False
+        return job.current_lease is None or job.current_lease.is_fenced

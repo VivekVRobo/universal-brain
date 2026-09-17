@@ -48,12 +48,14 @@ class EphemeralJobQueue:
         self,
         auth_service: Optional[WorkerAuthService] = None,
         event_store: Optional[EventStore] = None,
+        kernel_epoch: int = 1,
     ) -> None:
         self._workers: Dict[str, WorkerRegistration] = {}
         self._jobs: Dict[UUID, WorkerJob] = {}
         self._completed_idempotency_keys: Dict[str, UUID] = {}
         self.auth_service = auth_service or WorkerAuthService()
         self.event_store = event_store
+        self.kernel_epoch = kernel_epoch
         if self.event_store is not None:
             self.rehydrate_from_events()
 
@@ -139,6 +141,7 @@ class EphemeralJobQueue:
             job_type=job_type,
             payload=payload,
             idempotency_key=idempotency_key,
+            kernel_epoch=self.kernel_epoch,
         )
         job = job.model_copy(update={"payload_digest": job.compute_payload_digest()})
         return self._commit_job(EventType.WORKER_JOB_ENQUEUED, job, "ENQUEUED")
@@ -193,6 +196,7 @@ class EphemeralJobQueue:
         updated = target_job.model_copy(
             update={
                 "lease_generation": generation,
+                "kernel_epoch": self.kernel_epoch,
                 "current_lease": lease,
                 "status": JobStatus.LEASED,
             }
@@ -268,6 +272,38 @@ class EphemeralJobQueue:
         )
         self._commit_job(EventType.WORKER_JOB_PROGRESS, updated, "PROGRESS")
         return checkpoint
+
+    def fence_stale_epoch(self, current_epoch: int) -> List[UUID]:
+        """Fence active jobs leased by an older kernel epoch in canonical state."""
+        self.kernel_epoch = current_epoch
+        fenced_jobs: List[UUID] = []
+        for job in list(self._jobs.values()):
+            if job.status not in {
+                JobStatus.LEASED,
+                JobStatus.RUNNING,
+                JobStatus.CHECKPOINTING,
+            }:
+                continue
+            if job.kernel_epoch >= current_epoch:
+                continue
+            fenced_lease = (
+                job.current_lease.model_copy(update={"is_fenced": True})
+                if job.current_lease is not None
+                else None
+            )
+            updated = job.model_copy(
+                update={
+                    "current_lease": fenced_lease,
+                    "status": JobStatus.QUEUED,
+                }
+            )
+            self._commit_job(
+                EventType.WORKER_JOB_REQUEUED,
+                updated,
+                "KERNEL_EPOCH_FENCED",
+            )
+            fenced_jobs.append(job.job_id)
+        return fenced_jobs
 
     def reap_stale_leases(
         self,

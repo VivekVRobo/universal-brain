@@ -1,15 +1,8 @@
-"""
-Universal Brain - Authoritative Action State Machine & Lifecycle
+"""Canonical consequential-action state machine.
 
-Implements Section 3 of the Operator Console Specification:
-- Authoritative action lifecycle state machine;
-- 16-field TOCTOU Authorization Digest;
-- Optimistic concurrency (proposal_version tracking);
-- Strict separation of Reject (no rollback) vs. Rollback (undo executed state);
-- Command idempotency tracking.
-
-Version 1 is single-operator: operator identity is canonical server configuration,
-not a request-body authority claim.
+ActionManager is a projection of EventStore. Proposal creation and every durable
+state transition are appended to the canonical event ledger before the in-memory
+projection is mutated.
 """
 
 from __future__ import annotations
@@ -26,7 +19,8 @@ from pydantic import BaseModel, Field
 from universal_brain.config import settings
 from universal_brain.kernel.capability import CapabilityService, CapabilityToken
 from universal_brain.kernel.errors import ActionScopeViolationError, CapabilityDeniedError
-from universal_brain.kernel.events import ActionClass
+from universal_brain.kernel.event_store import EventStore
+from universal_brain.kernel.events import ActionClass, EventType
 
 
 class ActionStatus(str, Enum):
@@ -81,7 +75,9 @@ class ActionProposal(BaseModel):
         return now > self.expires_at
 
     def compute_payload_hash(self) -> str:
-        json_bytes = json.dumps(self.payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        json_bytes = json.dumps(
+            self.payload, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
         return hashlib.sha256(json_bytes).hexdigest()
 
     def compute_authorization_digest(
@@ -89,14 +85,14 @@ class ActionProposal(BaseModel):
         operator_identity: Optional[str] = None,
         approved_at: Optional[datetime] = None,
     ) -> str:
-        """Bind approval to the canonical server-side operator identity.
-
-        ``operator_identity`` remains accepted for compatibility with old clients,
-        but it is intentionally not authoritative in Version 1.
-        """
+        """Bind approval to the canonical server-side operator identity."""
         app_time = approved_at or datetime.now(timezone.utc)
-        preflight_digest = hashlib.sha256(f"preflight:{self.preflight_passed}".encode("utf-8")).hexdigest()
-        rollback_digest = hashlib.sha256(self.rollback_plan.encode("utf-8")).hexdigest()
+        preflight_digest = hashlib.sha256(
+            f"preflight:{self.preflight_passed}".encode("utf-8")
+        ).hexdigest()
+        rollback_digest = hashlib.sha256(
+            self.rollback_plan.encode("utf-8")
+        ).hexdigest()
 
         canonical_digest_dict = {
             "action_class": self.action_class.value,
@@ -116,21 +112,92 @@ class ActionProposal(BaseModel):
             "system_id": settings.system_id,
             "target_identity": self.target_resource,
         }
-        json_bytes = json.dumps(canonical_digest_dict, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        json_bytes = json.dumps(
+            canonical_digest_dict, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
         return hashlib.sha256(json_bytes).hexdigest()
 
 
 class ActionManager:
-    """Manages consequential action state transitions, TOCTOU checks, and idempotency."""
+    """Replayable projection of canonical consequential-action lifecycle events."""
 
-    def __init__(self, capability_service: CapabilityService) -> None:
+    def __init__(
+        self,
+        capability_service: CapabilityService,
+        event_store: Optional[EventStore] = None,
+    ) -> None:
         self.capability_service = capability_service
+        self.event_store = event_store
         self._proposals: Dict[UUID, ActionProposal] = {}
         self._idempotency_cache: Dict[str, Dict[str, Any]] = {}
+        if self.event_store is not None:
+            self.rehydrate_from_events()
 
     @staticmethod
     def _operator_identity() -> str:
         return settings.operator_id
+
+    def rehydrate_from_events(self) -> None:
+        self._proposals.clear()
+        self._idempotency_cache.clear()
+        if self.event_store is None:
+            return
+
+        for event in self.event_store.get_all_events():
+            if event.event_type not in {
+                EventType.ACTION_PROPOSED,
+                EventType.ACTION_STATE_CHANGED,
+            }:
+                continue
+            raw = event.payload.get("proposal")
+            if not isinstance(raw, dict):
+                continue
+            proposal = ActionProposal.model_validate(raw)
+            self._proposals[proposal.action_id] = proposal
+
+            key = event.payload.get("idempotency_key")
+            if not isinstance(key, str) or not key:
+                continue
+            raw_token = event.payload.get("token")
+            if isinstance(raw_token, dict):
+                self._idempotency_cache[key] = {"token": raw_token}
+            else:
+                self._idempotency_cache[key] = {
+                    "proposal": proposal.model_dump(mode="json")
+                }
+
+    def _append_projection_event(
+        self,
+        event_type: EventType,
+        proposal: ActionProposal,
+        *,
+        transition: str,
+        idempotency_key: Optional[str] = None,
+        token: Optional[CapabilityToken] = None,
+        reason: Optional[str] = None,
+    ) -> None:
+        if self.event_store is None:
+            return
+
+        payload: Dict[str, Any] = {
+            "transition": transition,
+            "proposal": proposal.model_dump(mode="json"),
+        }
+        if idempotency_key:
+            payload["idempotency_key"] = idempotency_key
+        if token is not None:
+            payload["token"] = token.model_dump(mode="json")
+        if reason:
+            payload["reason"] = reason
+
+        self.event_store.append_event(
+            event_type=event_type,
+            actor_id=self._operator_identity(),
+            payload=payload,
+            project_id=proposal.project_id,
+            task_id=proposal.task_id,
+            contract_version=proposal.contract_version,
+        )
 
     def get_proposal(self, action_id: UUID) -> Optional[ActionProposal]:
         return self._proposals.get(action_id)
@@ -166,7 +233,11 @@ class ActionManager:
             action_type=action_type,
             target_resource=target_resource,
             action_class=action_class,
-            status=ActionStatus.AWAITING_APPROVAL if preflight_passed else ActionStatus.PREFLIGHTING,
+            status=(
+                ActionStatus.AWAITING_APPROVAL
+                if preflight_passed
+                else ActionStatus.PREFLIGHTING
+            ),
             requested_effect=requested_effect,
             payload=payload,
             required_capabilities=required_capabilities,
@@ -174,6 +245,11 @@ class ActionManager:
             rollback_plan=rollback_plan,
             preflight_passed=preflight_passed,
             evidence_items_count=evidence_items_count,
+        )
+        self._append_projection_event(
+            EventType.ACTION_PROPOSED,
+            proposal,
+            transition="CREATED",
         )
         self._proposals[proposal.action_id] = proposal
         return proposal
@@ -204,7 +280,13 @@ class ActionManager:
             )
 
         if proposal.is_expired(current_time):
-            proposal.status = ActionStatus.EXPIRED
+            expired = proposal.model_copy(update={"status": ActionStatus.EXPIRED})
+            self._append_projection_event(
+                EventType.ACTION_STATE_CHANGED,
+                expired,
+                transition="EXPIRED",
+            )
+            self._proposals[action_id] = expired
             raise CapabilityDeniedError(
                 f"Action approval deadline expired at {proposal.expires_at.isoformat()}. "
                 "Proposal transitioned to EXPIRED."
@@ -227,32 +309,43 @@ class ActionManager:
                 "Authorization digest mismatch. Target, contract, preflight, or payload has mutated."
             )
 
-        # Authentication is now present, but A2 remains deliberately locked until
-        # the separate consequential-action challenge/rollback policy is completed.
         if proposal.action_class == ActionClass.A2:
             raise CapabilityDeniedError(
                 "A2_LOCKED_PENDING_CHALLENGE_POLICY: authenticated operator control plane is active, "
                 "but consequential execution remains disabled pending the dedicated A2 challenge and rollback gate."
             )
 
-        proposal.status = ActionStatus.AUTHORIZED
-        proposal.approved_at = now
-        proposal.operator_identity = canonical_operator
-
+        updated = proposal.model_copy(
+            update={
+                "status": ActionStatus.AUTHORIZED,
+                "approved_at": now,
+                "operator_identity": canonical_operator,
+            }
+        )
         token = self.capability_service.issue_token(
-            project_id=proposal.project_id,
-            task_id=proposal.task_id,
-            contract_id=proposal.contract_id,
-            contract_version=proposal.contract_version,
-            action_class=proposal.action_class,
-            target_resource=proposal.target_resource,
-            allowed_operations=proposal.required_capabilities,
+            project_id=updated.project_id,
+            task_id=updated.task_id,
+            contract_id=updated.contract_id,
+            contract_version=updated.contract_version,
+            action_class=updated.action_class,
+            target_resource=updated.target_resource,
+            allowed_operations=updated.required_capabilities,
             issued_by_operator=True,
         )
 
-        if idempotency_key:
-            self._idempotency_cache[idempotency_key] = {"token": token.model_dump()}
+        self._append_projection_event(
+            EventType.ACTION_STATE_CHANGED,
+            updated,
+            transition="AUTHORIZED",
+            idempotency_key=idempotency_key,
+            token=token,
+        )
+        self._proposals[action_id] = updated
 
+        if idempotency_key:
+            self._idempotency_cache[idempotency_key] = {
+                "token": token.model_dump(mode="json")
+            }
         return token
 
     def reject_action(
@@ -264,29 +357,50 @@ class ActionManager:
         idempotency_key: Optional[str] = None,
     ) -> ActionProposal:
         if idempotency_key and idempotency_key in self._idempotency_cache:
-            return ActionProposal.model_validate(self._idempotency_cache[idempotency_key]["proposal"])
+            return ActionProposal.model_validate(
+                self._idempotency_cache[idempotency_key]["proposal"]
+            )
 
         proposal = self.get_proposal(action_id)
         if not proposal:
             raise ValueError(f"Action proposal '{action_id}' does not exist.")
 
-        if proposal.status not in (ActionStatus.AWAITING_APPROVAL, ActionStatus.PREFLIGHTING, ActionStatus.PROPOSED):
+        if proposal.status not in (
+            ActionStatus.AWAITING_APPROVAL,
+            ActionStatus.PREFLIGHTING,
+            ActionStatus.PROPOSED,
+        ):
             raise ActionScopeViolationError(
-                f"Cannot reject action in state '{proposal.status.value}'. Action may have already executed."
+                f"Cannot reject action in state '{proposal.status.value}'. "
+                "Action may have already executed."
             )
 
         if proposal.proposal_version != proposal_version:
             raise ActionScopeViolationError(
-                f"Proposal version conflict: reviewed {proposal_version}, current {proposal.proposal_version}."
+                f"Proposal version conflict: reviewed {proposal_version}, "
+                f"current {proposal.proposal_version}."
             )
 
-        proposal.status = ActionStatus.REJECTED
-        proposal.operator_identity = self._operator_identity()
+        updated = proposal.model_copy(
+            update={
+                "status": ActionStatus.REJECTED,
+                "operator_identity": self._operator_identity(),
+            }
+        )
+        self._append_projection_event(
+            EventType.ACTION_STATE_CHANGED,
+            updated,
+            transition="REJECTED",
+            idempotency_key=idempotency_key,
+            reason=reason,
+        )
+        self._proposals[action_id] = updated
 
         if idempotency_key:
-            self._idempotency_cache[idempotency_key] = {"proposal": proposal.model_dump()}
-
-        return proposal
+            self._idempotency_cache[idempotency_key] = {
+                "proposal": updated.model_dump(mode="json")
+            }
+        return updated
 
     def rollback_action(
         self,
@@ -296,13 +410,19 @@ class ActionManager:
         idempotency_key: Optional[str] = None,
     ) -> ActionProposal:
         if idempotency_key and idempotency_key in self._idempotency_cache:
-            return ActionProposal.model_validate(self._idempotency_cache[idempotency_key]["proposal"])
+            return ActionProposal.model_validate(
+                self._idempotency_cache[idempotency_key]["proposal"]
+            )
 
         proposal = self.get_proposal(action_id)
         if not proposal:
             raise ValueError(f"Action proposal '{action_id}' does not exist.")
 
-        if proposal.status not in (ActionStatus.FAILED, ActionStatus.PARTIAL, ActionStatus.SUCCEEDED):
+        if proposal.status not in (
+            ActionStatus.FAILED,
+            ActionStatus.PARTIAL,
+            ActionStatus.SUCCEEDED,
+        ):
             raise ActionScopeViolationError(
                 f"Cannot rollback action in status '{proposal.status.value}'. "
                 "Rollback requires an executed, failed, or partial state."
@@ -314,11 +434,23 @@ class ActionManager:
                 "but A2 rollback remains disabled pending a signed RollbackGrant challenge flow."
             )
 
-        # NOTE: physical/external compensation is addressed in Root Problem 4.
-        proposal.status = ActionStatus.ROLLED_BACK
-        proposal.operator_identity = self._operator_identity()
+        updated = proposal.model_copy(
+            update={
+                "status": ActionStatus.ROLLED_BACK,
+                "operator_identity": self._operator_identity(),
+            }
+        )
+        self._append_projection_event(
+            EventType.ACTION_STATE_CHANGED,
+            updated,
+            transition="ROLLED_BACK",
+            idempotency_key=idempotency_key,
+            reason=reason,
+        )
+        self._proposals[action_id] = updated
 
         if idempotency_key:
-            self._idempotency_cache[idempotency_key] = {"proposal": proposal.model_dump()}
-
-        return proposal
+            self._idempotency_cache[idempotency_key] = {
+                "proposal": updated.model_dump(mode="json")
+            }
+        return updated

@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
+import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from "react";
 import {
   ActionProposal,
   ActiveView,
@@ -38,6 +38,7 @@ export const ConsoleProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [pendingActions, setPendingActions] = useState<ActionProposal[]>([]);
   const [activeModalAction, setActiveModalAction] = useState<ActionProposal | null>(null);
   const [activeEvidence, setActiveEvidence] = useState<any | null>(null);
+  const websocketConnected = useRef(false);
 
   const refreshState = useCallback(async () => {
     try {
@@ -52,10 +53,10 @@ export const ConsoleProvider: React.FC<{ children: React.ReactNode }> = ({ child
         setActiveProject(projList[0]);
       }
       setPendingActions(actions);
-      setSyncState("LIVE");
+      setSyncState(websocketConnected.current ? "LIVE" : "RECONCILING");
     } catch (err) {
       console.warn("API state reconciliation error:", err);
-      setSyncState("DISCONNECTED");
+      setSyncState(websocketConnected.current ? "DEGRADED" : "DISCONNECTED");
     }
   }, [activeProject]);
 
@@ -81,6 +82,7 @@ export const ConsoleProvider: React.FC<{ children: React.ReactNode }> = ({ child
       ws = new WebSocket(OperatorAuth.websocketUrl(baseUrl));
 
       ws.onopen = () => {
+        websocketConnected.current = true;
         setSyncState("LIVE");
         ws?.send(JSON.stringify({ action: "subscribe", last_confirmed_sequence: 0 }));
       };
@@ -99,6 +101,7 @@ export const ConsoleProvider: React.FC<{ children: React.ReactNode }> = ({ child
       };
 
       ws.onclose = (event) => {
+        websocketConnected.current = false;
         setSyncState("DISCONNECTED");
         if (event.code === 4401) {
           OperatorAuth.clear();
@@ -123,6 +126,7 @@ export const ConsoleProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     return () => {
       disposed = true;
+      websocketConnected.current = false;
       unsubscribe();
       if (ws) ws.close();
       if (reconnectTimeout) clearTimeout(reconnectTimeout);

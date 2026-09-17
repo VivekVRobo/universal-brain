@@ -19,8 +19,15 @@ from universal_brain.kernel.event_store import EventStore
 from universal_brain.kernel.events import EventEdge, EventEnvelope, EventType, RelationType
 from universal_brain.persistence.engine import DatabaseManager
 from universal_brain.persistence.errors import IntegrityFailureError
-from universal_brain.persistence.models import EventEdgeORM, EventORM, TaskORM
+from universal_brain.persistence.models import (
+    EventEdgeORM,
+    EventORM,
+    TaskORM,
+    WorkerCheckpointORM,
+    WorkerJobORM,
+)
 from universal_brain.persistence.unit_of_work import UnitOfWork
+from universal_brain.tools.workers.queue import EphemeralJobQueue
 
 
 class StartupRecoveryManager:
@@ -80,6 +87,21 @@ class StartupRecoveryManager:
                 edge.relation_type.value,
             )
 
+    async def _rebuild_sql_worker_projection(
+        self,
+        uow: UnitOfWork,
+        queue: EphemeralJobQueue,
+    ) -> None:
+        """Replace SQL worker-job/checkpoint indexes from canonical job snapshots."""
+        await uow._session.execute(delete(WorkerCheckpointORM))
+        await uow._session.execute(delete(WorkerJobORM))
+        await uow._session.flush()
+
+        for job in queue._jobs.values():
+            await uow.jobs.save_job(job, kernel_epoch=job.kernel_epoch)
+            for checkpoint in job.checkpoints:
+                await uow.worker_checkpoints.save_checkpoint(checkpoint)
+
     async def run_startup_recovery(self, instance_id: str = "ub-node-01") -> Dict[str, Any]:
         self.system_status = "RECOVERING"
         unclean_shutdown = False
@@ -122,9 +144,24 @@ class StartupRecoveryManager:
 
                     self.event_store.verify_chain_integrity()
 
+                    # Worker jobs are canonical projections too. Fence stale
+                    # execution epochs by appending canonical requeue events before
+                    # rebuilding any SQL indexes.
+                    canonical_worker_queue = EphemeralJobQueue(
+                        event_store=self.event_store,
+                        kernel_epoch=self.current_epoch,
+                    )
+                    workers_fenced = len(
+                        canonical_worker_queue.fence_stale_epoch(self.current_epoch)
+                    )
+
                     # SQL is a projection now. Any SQL-only rows, missing rows, or
-                    # stale edges are overwritten from canonical journal truth.
+                    # stale rows are overwritten from canonical journal truth.
                     await self._rebuild_sql_event_projection(uow)
+                    await self._rebuild_sql_worker_projection(
+                        uow,
+                        canonical_worker_queue,
+                    )
                 else:
                     # Compatibility mode for tests/legacy components that have not
                     # opted into the canonical journal yet.
@@ -139,7 +176,10 @@ class StartupRecoveryManager:
                 ) from exc
 
             leases_fenced = await uow.leases.fence_stale_leases(self.current_epoch)
-            workers_fenced = await uow.jobs.fence_stale_workers(self.current_epoch)
+            if not self.event_store.is_durable:
+                # Legacy compatibility only. Durable runtimes fence worker jobs
+                # through canonical events above and then rebuild SQL from them.
+                workers_fenced = await uow.jobs.fence_stale_workers(self.current_epoch)
 
             stmt = select(TaskORM).where(
                 TaskORM.status.in_(["RUNNING", "EXECUTING", "COGNITIVE_WORK"])

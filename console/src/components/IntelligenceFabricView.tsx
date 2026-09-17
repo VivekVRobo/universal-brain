@@ -72,7 +72,7 @@ export const IntelligenceFabricView: React.FC = () => {
           <h1>Intelligence Fabric</h1>
           <p>Model identity, route health, privacy, quota and empirical quality. No prompt bodies are exposed here.</p>
         </div>
-        <div className="fabric-live"><span className="status-dot pulse-emerald" /> OBSERVABILITY LIVE</div>
+        <div className="fabric-live"><span className="status-dot pulse-emerald" /> OBSERVABILITY ATTACHED</div>
       </div>
 
       <div className="fabric-summary-grid">

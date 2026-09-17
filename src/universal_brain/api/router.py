@@ -848,13 +848,12 @@ async def create_mission_endpoint(
     req: Dict[str, Any],
     container: RuntimeContainer = Depends(get_container),
 ) -> Dict[str, Any]:
-    """Creates and registers a new durable Mission."""
+    """Create a mission in canonical durable state; SQL is only a projection."""
     from universal_brain.autonomy.schemas import Mission, MissionStatus
-    from universal_brain.persistence.unit_of_work import UnitOfWork
 
-    proj_id = UUID(req["project_id"])
+    project_id = UUID(req["project_id"])
     mission = Mission(
-        project_id=proj_id,
+        project_id=project_id,
         title=req.get("title", "Untitled Mission"),
         goal=req.get("goal", ""),
         description=req.get("description", ""),
@@ -864,12 +863,20 @@ async def create_mission_endpoint(
         status=MissionStatus.READY,
     )
 
-    async with UnitOfWork(container.db_manager) as uow:
-        assert uow.missions is not None
-        orm = await uow.missions.create_mission(mission)
-        await uow.commit()
+    container.event_store.append_event(
+        EventType.MISSION_CREATED,
+        actor_id=settings.operator_id,
+        payload={"mission": mission.model_dump(mode="json")},
+        project_id=project_id,
+        contract_version=mission.contract_version,
+    )
 
-    return {"status": "MISSION_CREATED", "mission": mission.model_dump(mode="json")}
+    return {
+        "status": "MISSION_CREATED",
+        "mission": mission.model_dump(mode="json"),
+        "source_of_truth": "canonical_event_journal",
+        "sql_projection_status": "DEFERRED_TO_RECONCILIATION",
+    }
 
 
 @router.get("/missions/{mission_id}")
@@ -877,24 +884,23 @@ async def get_mission_endpoint(
     mission_id: UUID,
     container: RuntimeContainer = Depends(get_container),
 ) -> Dict[str, Any]:
-    """Retrieves current mission state and progress."""
-    from universal_brain.persistence.unit_of_work import UnitOfWork
+    """Read mission state only from the canonical event projection."""
+    mission = latest_mission(container.event_store, mission_id)
+    if mission is None:
+        raise HTTPException(status_code=404, detail="Mission not found in canonical state")
 
-    async with UnitOfWork(container.db_manager) as uow:
-        assert uow.missions is not None
-        m = await uow.missions.get_mission(mission_id)
-        if not m:
-            raise HTTPException(status_code=404, detail="Mission not found")
-        return {
-            "mission_id": str(m.mission_id),
-            "project_id": str(m.project_id),
-            "title": m.title,
-            "goal": m.goal,
-            "status": m.status,
-            "priority": m.priority,
-            "mission_version": m.mission_version,
-            "created_at": m.created_at.isoformat(),
-        }
+    return {
+        "mission_id": str(mission.mission_id),
+        "project_id": str(mission.project_id),
+        "title": mission.title,
+        "goal": mission.goal,
+        "status": mission.status.value,
+        "priority": mission.priority,
+        "mission_version": mission.mission_version,
+        "created_at": mission.created_at.isoformat(),
+        "updated_at": mission.updated_at.isoformat(),
+        "source_of_truth": "canonical_event_journal",
+    }
 
 
 @router.post("/missions/{mission_id}/pause")
@@ -903,19 +909,47 @@ async def pause_mission_endpoint(
     req: Dict[str, Any],
     container: RuntimeContainer = Depends(get_container),
 ) -> Dict[str, Any]:
-    """Pauses an active mission (M7 Section 82)."""
-    from universal_brain.persistence.unit_of_work import UnitOfWork
+    """Pause a mission by appending a new canonical mission snapshot."""
+    from universal_brain.autonomy.schemas import MissionStatus
 
-    expected_version = int(req.get("expected_version", 1))
-    async with UnitOfWork(container.db_manager) as uow:
-        assert uow.missions is not None
-        updated = await uow.missions.update_mission_status_with_version(
-            mission_id=mission_id,
-            expected_version=expected_version,
-            new_status="PAUSED",
+    mission = latest_mission(container.event_store, mission_id)
+    if mission is None:
+        raise HTTPException(status_code=404, detail="Mission not found in canonical state")
+
+    expected_version = int(req.get("expected_version", mission.mission_version))
+    if mission.mission_version != expected_version:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Mission version conflict: expected {expected_version}, "
+                f"canonical version is {mission.mission_version}."
+            ),
         )
-        await uow.commit()
-    return {"status": "MISSION_PAUSED", "mission_version": updated.mission_version}
+    if mission.status in {MissionStatus.COMPLETED, MissionStatus.FAILED, MissionStatus.CANCELLED}:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Mission in terminal state {mission.status.value} cannot be paused.",
+        )
+
+    updated = mission.model_copy(
+        update={
+            "status": MissionStatus.PAUSED,
+            "mission_version": mission.mission_version + 1,
+            "updated_at": datetime.now(timezone.utc),
+        }
+    )
+    container.event_store.append_event(
+        EventType.MISSION_PAUSED,
+        actor_id=settings.operator_id,
+        payload={"mission": updated.model_dump(mode="json")},
+        project_id=updated.project_id,
+        contract_version=updated.contract_version,
+    )
+    return {
+        "status": "MISSION_PAUSED",
+        "mission_version": updated.mission_version,
+        "source_of_truth": "canonical_event_journal",
+    }
 
 
 @router.post("/missions/{mission_id}/resume")
@@ -924,19 +958,47 @@ async def resume_mission_endpoint(
     req: Dict[str, Any],
     container: RuntimeContainer = Depends(get_container),
 ) -> Dict[str, Any]:
-    """Resumes a paused mission."""
-    from universal_brain.persistence.unit_of_work import UnitOfWork
+    """Resume a paused mission through a canonical durable transition."""
+    from universal_brain.autonomy.schemas import MissionStatus
 
-    expected_version = int(req.get("expected_version", 1))
-    async with UnitOfWork(container.db_manager) as uow:
-        assert uow.missions is not None
-        updated = await uow.missions.update_mission_status_with_version(
-            mission_id=mission_id,
-            expected_version=expected_version,
-            new_status="ACTIVE",
+    mission = latest_mission(container.event_store, mission_id)
+    if mission is None:
+        raise HTTPException(status_code=404, detail="Mission not found in canonical state")
+
+    expected_version = int(req.get("expected_version", mission.mission_version))
+    if mission.mission_version != expected_version:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Mission version conflict: expected {expected_version}, "
+                f"canonical version is {mission.mission_version}."
+            ),
         )
-        await uow.commit()
-    return {"status": "MISSION_ACTIVE", "mission_version": updated.mission_version}
+    if mission.status != MissionStatus.PAUSED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Only a PAUSED mission can resume; current state is {mission.status.value}.",
+        )
+
+    updated = mission.model_copy(
+        update={
+            "status": MissionStatus.ACTIVE,
+            "mission_version": mission.mission_version + 1,
+            "updated_at": datetime.now(timezone.utc),
+        }
+    )
+    container.event_store.append_event(
+        EventType.MISSION_RESUMED,
+        actor_id=settings.operator_id,
+        payload={"mission": updated.model_dump(mode="json")},
+        project_id=updated.project_id,
+        contract_version=updated.contract_version,
+    )
+    return {
+        "status": "MISSION_ACTIVE",
+        "mission_version": updated.mission_version,
+        "source_of_truth": "canonical_event_journal",
+    }
 
 
 # =============================================================================

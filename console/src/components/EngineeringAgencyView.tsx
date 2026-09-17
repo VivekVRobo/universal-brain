@@ -36,7 +36,7 @@ export const EngineeringAgencyView: React.FC = () => {
   }, []);
 
   const semanticSummary = useMemo(() => {
-    if (!status || status.semantic_backends.length === 0) return "fallback graph";
+    if (!status || status.semantic_backends.length === 0) return "not reported";
     return status.semantic_backends.join(" + ");
   }, [status]);
 
@@ -63,7 +63,7 @@ export const EngineeringAgencyView: React.FC = () => {
             services and repository-level execution state.
           </p>
         </div>
-        <div className="engineering-live"><span className="status-dot pulse-emerald" /> HARDENING LIVE</div>
+        <div className="engineering-live"><span className="status-dot pulse-emerald" /> OBSERVABILITY ATTACHED</div>
       </div>
 
       <div className="engineering-summary-grid">

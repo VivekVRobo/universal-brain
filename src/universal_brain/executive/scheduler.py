@@ -11,7 +11,7 @@ Implements Sections 45 & 46 of the God-Level Specification:
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from universal_brain.alignment.contract import AlignmentContract
 from universal_brain.executive.eap import EAPBuilder
@@ -21,9 +21,7 @@ from universal_brain.executive.leases import ModelLeaseController
 from universal_brain.executive.router import ModelRouter
 from universal_brain.executive.schemas import TaskDAG, TaskNode, TaskNodeStatus
 from universal_brain.kernel.capability import CapabilityService
-from universal_brain.kernel.errors import InvariantViolationError
 from universal_brain.kernel.event_store import EventStore
-from universal_brain.kernel.events import ActionClass, EventType
 from universal_brain.memory.retention import StorageRetentionManager
 
 if TYPE_CHECKING:
@@ -56,9 +54,8 @@ class ExecutiveScheduler:
         self.failure_ledger = failure_ledger or FailureLedger()
 
     def get_ready_nodes(self, dag: TaskDAG) -> List[TaskNode]:
-        """Finds planned nodes whose dependencies have all SUCCEEDED."""
         ready = []
-        for nid, node in dag.nodes.items():
+        for node in dag.nodes.values():
             if node.status == TaskNodeStatus.PLANNED:
                 deps_met = all(
                     dag.nodes[dep].status == TaskNodeStatus.SUCCEEDED
@@ -78,15 +75,6 @@ class ExecutiveScheduler:
         contract: AlignmentContract,
         session_id: UUID,
     ) -> Dict[str, Any]:
-        """
-        Executes one cognitive/execution cycle:
-        1. Find next READY node.
-        2. Route eligible model & grant lease.
-        3. Build EAP.
-        4. Ingest model response.
-        5. Dispatch tool via ToolGateway.
-        6. Verify evidence & advance state.
-        """
         ready_nodes = self.get_ready_nodes(dag)
         if not ready_nodes:
             all_succeeded = all(n.status == TaskNodeStatus.SUCCEEDED for n in dag.nodes.values())
@@ -99,11 +87,9 @@ class ExecutiveScheduler:
         active_node = ready_nodes[0]
         active_node.status = TaskNodeStatus.COGNITIVE_WORK
 
-        # 1. Route Model
         decision = self.router.select_model(required_context_tokens=4000)
         provider = decision.selected_provider
 
-        # 2. Grant Lease
         lease = self.lease_controller.grant_lease(
             provider_id=provider.metadata.provider_id,
             model_id=provider.metadata.model_id,
@@ -111,7 +97,6 @@ class ExecutiveScheduler:
             project_id=dag.project_id,
         )
 
-        # 3. Build EAP
         eap = self.eap_builder.build_eap(
             project_id=dag.project_id,
             session_id=session_id,
@@ -127,7 +112,6 @@ class ExecutiveScheduler:
             failures=self.failure_ledger.list_failures(dag.dag_id),
         )
 
-        # 4. Invoke Provider
         response = await provider.generate_response(eap)
         self.lease_controller.record_usage(
             lease_id=lease.lease_id,
@@ -136,7 +120,6 @@ class ExecutiveScheduler:
             cost_usd=0.005,
         )
 
-        # 5. Handle Handoff Request if model recommends or context threshold
         if response.handoff_recommended:
             snapshot = self.handoff_manager.create_snapshot(
                 project_id=dag.project_id,
@@ -161,23 +144,21 @@ class ExecutiveScheduler:
                 "new_lease_id": str(new_lease.lease_id),
             }
 
-        # 6. Dispatch Proposed Tools
         tool_results = []
         for call in response.requested_tool_calls:
             tool_name = call.get("tool_name")
             target = call.get("arguments", {}).get("target", "./src/robot_controller.cpp")
 
-            # Mint Scoped Capability Token
             token = self.capability_service.issue_token(
                 project_id=dag.project_id,
                 task_id=dag.dag_id,
+                contract_id=contract.contract_id,
                 contract_version=contract.version,
                 action_class=active_node.action_class,
                 target_resource=target,
                 allowed_operations=list(set(active_node.required_capabilities + [tool_name])),
             )
 
-            # Execute via ToolGateway
             if tool_name in self.tool_gateway._registry:
                 res = self.tool_gateway.execute_tool(
                     tool_name=tool_name,
@@ -188,7 +169,6 @@ class ExecutiveScheduler:
                 )
                 tool_results.append(res)
 
-        # 7. Advance Node State
         active_node.status = TaskNodeStatus.SUCCEEDED
 
         return {

@@ -9,6 +9,7 @@ Satisfies the Runtime Singleton Invariant: Never spawn an alternate authoritativ
 from typing import Optional, Any
 
 from universal_brain.alignment.engine import AlignmentEngine
+from universal_brain.config import settings
 from universal_brain.api.actions import ActionManager
 from universal_brain.api.websocket import WebSocketGateway
 from universal_brain.executive.budget import BudgetGatekeeper
@@ -43,7 +44,9 @@ class RuntimeContainer:
         intelligence_stack: Optional[Any] = None,
         engineering_stack: Optional[Any] = None,
     ) -> None:
-        self.event_store = event_store or EventStore()
+        self.event_store = event_store or EventStore.durable(
+            settings.canonical_event_journal_path
+        )
         self.capability_service = capability_service or CapabilityService()
         self.budget_gatekeeper = budget_gatekeeper or BudgetGatekeeper()
         self.retention_manager = retention_manager or StorageRetentionManager(critical_threshold_pct=99.9)
@@ -77,6 +80,8 @@ class RuntimeContainer:
 
         self.intelligence_stack = intelligence_stack
         self.engineering_stack = engineering_stack
+        self._recovery_completed = settings.app_env not in {"production", "staging"}
+        self._recovery_report: Optional[dict[str, Any]] = None
 
     @property
     def db_manager(self) -> DatabaseManager:
@@ -105,9 +110,26 @@ class RuntimeContainer:
             self._recovery_manager = StartupRecoveryManager(self.db_manager, self.event_store)
         return self._recovery_manager
 
+    def mark_recovery_complete(self, report: dict[str, Any]) -> None:
+        self._recovery_completed = report.get("system_status") == "READY"
+        self._recovery_report = dict(report)
+
+    @property
+    def recovery_completed(self) -> bool:
+        return self._recovery_completed
+
+    @property
+    def canonical_state_ready(self) -> bool:
+        """Whether state-changing runtime work has a durable recovered authority."""
+        if not self.event_store.is_durable:
+            return False
+        if settings.app_env in {"production", "staging"}:
+            return self._recovery_completed
+        return True
+
     @property
     def persistence_initialized(self) -> bool:
-        """Whether this container has materialized persistence infrastructure."""
+        """Whether the SQL projection manager has been materialized."""
         return self._db_manager is not None
 
 

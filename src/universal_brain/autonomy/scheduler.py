@@ -1,29 +1,16 @@
-"""
-Universal Brain - Long-Horizon Mission Scheduler
-
-Implements M7 Sections 30-34 and Invariants M7-INV-07, M7-INV-15, M7-INV-17:
-- Single-owner epoch-fenced mission coordination;
-- Priority-ranked, starvation-free scheduling across concurrent missions;
-- Scoped Agent Cell leasing and task dispatch;
-- Integrates progress watchdogs, durable wakeups, budget gating, and replanning.
-"""
+"""Long-horizon mission scheduler backed by canonical event projections."""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from universal_brain.autonomy.anti_loop import AntiLoopEngine
 from universal_brain.autonomy.blackboard import MissionBlackboard
 from universal_brain.autonomy.commitments import CommitmentTracker
 from universal_brain.autonomy.dependencies import DependencyCoordinator
-from universal_brain.autonomy.errors import (
-    MissionBudgetExceededError,
-    MissionContractChangedError,
-    MissionStateError,
-    SchedulerFencedError,
-)
+from universal_brain.autonomy.errors import MissionStateError, SchedulerFencedError
 from universal_brain.autonomy.escalation import EscalationEngine
 from universal_brain.autonomy.leases import AgentLeaseController
 from universal_brain.autonomy.roles import AgentRoleRegistry
@@ -33,6 +20,7 @@ from universal_brain.autonomy.schemas import (
     AgentRole,
     Mission,
     MissionStatus,
+    WakeupRecord,
     WakeupType,
 )
 from universal_brain.autonomy.wakeups import WakeupManager
@@ -42,8 +30,21 @@ from universal_brain.kernel.event_store import EventStore
 from universal_brain.kernel.events import ActionClass, EventType
 
 
+_MISSION_STATE_EVENTS = {
+    EventType.MISSION_CREATED,
+    EventType.MISSION_ACTIVATED,
+    EventType.MISSION_PAUSED,
+    EventType.MISSION_RESUMED,
+    EventType.MISSION_CANCELLED,
+    EventType.MISSION_COMPLETED,
+    EventType.MISSION_FAILED,
+    EventType.MISSION_WAKEUP_SCHEDULED,
+    EventType.MISSION_WAKEUP_FIRED,
+}
+
+
 class MissionScheduler:
-    """Coordinates long-horizon missions, agent cell leases, and external waits."""
+    """Coordinates missions while keeping RAM as a replayable projection."""
 
     def __init__(
         self,
@@ -76,8 +77,52 @@ class MissionScheduler:
         self._missions: Dict[UUID, Mission] = {}
         self._agents: Dict[UUID, AgentCell] = {}
         self._task_generations: Dict[UUID, int] = {}
+        self.rehydrate_from_events()
+
+    def rehydrate_from_events(self) -> None:
+        """Reconstruct scheduler mission/agent/lease/wakeup projections."""
+        self._missions.clear()
+        self._agents.clear()
+        self._task_generations.clear()
+        self.lease_controller._leases.clear()
+        self.wakeup_manager._wakeups.clear()
+
+        for event in self.event_store.get_all_events():
+            if event.event_type in _MISSION_STATE_EVENTS:
+                raw_mission = event.payload.get("mission")
+                if isinstance(raw_mission, dict):
+                    mission = Mission.model_validate(raw_mission)
+                    self._missions[mission.mission_id] = mission
+
+                raw_wakeup = event.payload.get("wakeup")
+                if isinstance(raw_wakeup, dict):
+                    wakeup = WakeupRecord.model_validate(raw_wakeup)
+                    self.wakeup_manager._wakeups[wakeup.wakeup_id] = wakeup
+
+            if event.event_type == EventType.AGENT_LEASE_GRANTED:
+                raw_agent = event.payload.get("agent")
+                raw_lease = event.payload.get("lease")
+                if not isinstance(raw_agent, dict) or not isinstance(raw_lease, dict):
+                    continue
+                agent = AgentCell.model_validate(raw_agent)
+                lease = AgentLease.model_validate(raw_lease)
+                self._agents[agent.agent_id] = agent
+                self.lease_controller._leases[lease.lease_id] = lease
+                for task_id in lease.task_scope:
+                    self._task_generations[task_id] = max(
+                        self._task_generations.get(task_id, 0),
+                        lease.lease_generation,
+                    )
 
     def register_mission(self, mission: Mission) -> None:
+        """Durably register a mission before exposing it in scheduler RAM."""
+        self.event_store.append_event(
+            EventType.MISSION_CREATED,
+            actor_id=str(self.instance_id),
+            payload={"mission": mission.model_dump(mode="json")},
+            project_id=mission.project_id,
+            contract_version=mission.contract_version,
+        )
         self._missions[mission.mission_id] = mission
 
     def get_mission(self, mission_id: UUID) -> Optional[Mission]:
@@ -91,35 +136,26 @@ class MissionScheduler:
         action_ceiling: ActionClass = ActionClass.A1,
         tool_scope: Optional[List[str]] = None,
     ) -> AgentLease:
-        """
-        Creates an Agent Cell and issues an authoritative, fenced lease (M7 Sections 21 & 25).
-        Enforces M7-INV-04 & M7-INV-05.
-        """
-        # Validate mission state allows assignment
         if mission.status not in (MissionStatus.ACTIVE, MissionStatus.READY):
             raise MissionStateError(
-                f"Cannot assign agent: mission {mission.mission_id} is in status {mission.status.value}."
+                f"Cannot assign agent: mission {mission.mission_id} "
+                f"is in status {mission.status.value}."
             )
 
         profile = AgentRoleRegistry.get_profile(role)
-        # Capability ceiling bounded by mission maximum and role recommendation
         effective_ceiling = min(
             action_ceiling.value,
             mission.maximum_action_class.value,
             profile.maximum_recommended_action_class.value,
         )
 
+        generation = self._task_generations.get(task_id, 0) + 1
         agent = AgentCell(
             mission_id=mission.mission_id,
             role=role,
             assigned_task_ids=[task_id],
             status="ACTIVE",
         )
-        self._agents[agent.agent_id] = agent
-
-        # Advance task lease generation
-        gen = self._task_generations.get(task_id, 0) + 1
-        self._task_generations[task_id] = gen
 
         lease = self.lease_controller.grant_lease(
             agent_id=agent.agent_id,
@@ -128,26 +164,35 @@ class MissionScheduler:
             capability_ceiling=ActionClass(effective_ceiling),
             tool_scope=tool_scope or profile.allowed_tool_categories,
             kernel_epoch=self.kernel_epoch,
-            lease_generation=gen,
+            lease_generation=generation,
         )
-        agent.current_lease_id = lease.lease_id
+        agent = agent.model_copy(update={"current_lease_id": lease.lease_id})
 
-        # Emit canonical event
-        self.event_store.append_event(
-            EventType.AGENT_LEASE_GRANTED,
-            actor_id=str(self.instance_id),
-            payload={
-                "mission_id": str(mission.mission_id),
-                "agent_id": str(agent.agent_id),
-                "role": role.value,
-                "task_id": str(task_id),
-                "lease_id": str(lease.lease_id),
-                "lease_generation": gen,
-                "kernel_epoch": self.kernel_epoch,
-            },
-            project_id=mission.project_id,
-        )
+        try:
+            self.event_store.append_event(
+                EventType.AGENT_LEASE_GRANTED,
+                actor_id=str(self.instance_id),
+                payload={
+                    "mission_id": str(mission.mission_id),
+                    "agent_id": str(agent.agent_id),
+                    "role": role.value,
+                    "task_id": str(task_id),
+                    "lease_id": str(lease.lease_id),
+                    "lease_generation": generation,
+                    "kernel_epoch": self.kernel_epoch,
+                    "agent": agent.model_dump(mode="json"),
+                    "lease": lease.model_dump(mode="json"),
+                },
+                project_id=mission.project_id,
+                task_id=task_id,
+                contract_version=mission.contract_version,
+            )
+        except Exception:
+            self.lease_controller._leases.pop(lease.lease_id, None)
+            raise
 
+        self._agents[agent.agent_id] = agent
+        self._task_generations[task_id] = generation
         return lease
 
     def schedule_external_wait(
@@ -158,12 +203,14 @@ class MissionScheduler:
         task_id: Optional[UUID] = None,
         trigger_condition: Optional[dict] = None,
     ) -> None:
-        """
-        Puts mission into WAITING_EXTERNAL and registers durable wakeup (M7 Section 64).
-        """
-        mission.status = MissionStatus.WAITING_EXTERNAL
-        mission.mission_version += 1
-        mission.updated_at = datetime.now(timezone.utc)
+        previous = self._missions.get(mission.mission_id, mission)
+        updated = mission.model_copy(
+            update={
+                "status": MissionStatus.WAITING_EXTERNAL,
+                "mission_version": mission.mission_version + 1,
+                "updated_at": datetime.now(timezone.utc),
+            }
+        )
 
         wakeup = self.wakeup_manager.schedule_wakeup(
             mission_id=mission.mission_id,
@@ -173,48 +220,80 @@ class MissionScheduler:
             trigger_condition=trigger_condition,
         )
 
-        self.event_store.append_event(
-            EventType.MISSION_WAKEUP_SCHEDULED,
-            actor_id=str(self.instance_id),
-            payload={
-                "mission_id": str(mission.mission_id),
-                "wakeup_id": str(wakeup.wakeup_id),
-                "trigger_type": trigger_type.value,
-                "due_at": due_at.isoformat(),
-            },
-            project_id=mission.project_id,
-        )
+        try:
+            self.event_store.append_event(
+                EventType.MISSION_WAKEUP_SCHEDULED,
+                actor_id=str(self.instance_id),
+                payload={
+                    "mission_id": str(mission.mission_id),
+                    "mission": updated.model_dump(mode="json"),
+                    "wakeup": wakeup.model_dump(mode="json"),
+                },
+                project_id=mission.project_id,
+                task_id=task_id,
+                contract_version=mission.contract_version,
+            )
+        except Exception:
+            self.wakeup_manager._wakeups.pop(wakeup.wakeup_id, None)
+            self._missions[mission.mission_id] = previous
+            raise
+
+        self._missions[mission.mission_id] = updated
 
     def process_due_wakeups(self, now: Optional[datetime] = None) -> int:
-        """Checks and fires all due wakeups idempotently (M7 Section 69)."""
         due = self.wakeup_manager.get_due_wakeups(now)
         fired_count = 0
-        for w in due:
-            if self.wakeup_manager.claim_wakeup(w.wakeup_id):
-                mission = self._missions.get(w.mission_id)
-                if mission:
-                    w_fired = self.wakeup_manager.fire_wakeup(
-                        w.wakeup_id,
-                        current_mission_version=mission.mission_version,
-                        expected_mission_version=mission.mission_version,
-                    )
-                    if mission.status == MissionStatus.WAITING_EXTERNAL:
-                        mission.status = MissionStatus.ACTIVE
-                        mission.mission_version += 1
-                        mission.updated_at = datetime.now(timezone.utc)
-                    fired_count += 1
 
-                    self.event_store.append_event(
-                        EventType.MISSION_WAKEUP_FIRED,
-                        actor_id=str(self.instance_id),
-                        payload={"mission_id": str(mission.mission_id), "wakeup_id": str(w_fired.wakeup_id)},
-                        project_id=mission.project_id,
-                    )
+        for wakeup in due:
+            mission = self._missions.get(wakeup.mission_id)
+            if mission is None:
+                continue
+
+            previous_wakeup = wakeup.model_copy(deep=True)
+            if not self.wakeup_manager.claim_wakeup(wakeup.wakeup_id):
+                continue
+
+            fired = self.wakeup_manager.fire_wakeup(
+                wakeup.wakeup_id,
+                current_mission_version=mission.mission_version,
+                expected_mission_version=mission.mission_version,
+            )
+
+            updated = mission
+            if mission.status == MissionStatus.WAITING_EXTERNAL:
+                updated = mission.model_copy(
+                    update={
+                        "status": MissionStatus.ACTIVE,
+                        "mission_version": mission.mission_version + 1,
+                        "updated_at": datetime.now(timezone.utc),
+                    }
+                )
+
+            try:
+                self.event_store.append_event(
+                    EventType.MISSION_WAKEUP_FIRED,
+                    actor_id=str(self.instance_id),
+                    payload={
+                        "mission_id": str(mission.mission_id),
+                        "mission": updated.model_dump(mode="json"),
+                        "wakeup": fired.model_dump(mode="json"),
+                    },
+                    project_id=mission.project_id,
+                    task_id=wakeup.task_id,
+                    contract_version=mission.contract_version,
+                )
+            except Exception:
+                self.wakeup_manager._wakeups[wakeup.wakeup_id] = previous_wakeup
+                raise
+
+            self._missions[mission.mission_id] = updated
+            fired_count += 1
+
         return fired_count
 
     def fence_stale_scheduler(self, current_authoritative_epoch: int) -> None:
-        """Fences this scheduler if a higher kernel epoch has booted (M7 Section 20)."""
         if self.kernel_epoch < current_authoritative_epoch:
             raise SchedulerFencedError(
-                f"Scheduler {self.instance_id} fenced: epoch {self.kernel_epoch} < authoritative {current_authoritative_epoch}."
+                f"Scheduler {self.instance_id} fenced: epoch {self.kernel_epoch} "
+                f"< authoritative {current_authoritative_epoch}."
             )

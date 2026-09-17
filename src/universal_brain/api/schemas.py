@@ -33,10 +33,10 @@ class RuntimeHealthResponse(BaseModel):
     budget_spend_usd: float
     monthly_budget_usd: float
     budget_tier: BudgetTier
-    active_model_lease: str
-    lease_expires_in_seconds: int
+    active_model_lease: Optional[str] = None
+    lease_expires_in_seconds: Optional[int] = None
     active_actions_count: int
-    contract_version: int
+    contract_version: Optional[int] = None
     system_mode: str  # LIVE | LOCAL | DEMO
 
 
@@ -46,9 +46,9 @@ class ProjectSummaryResponse(BaseModel):
     project_id: UUID
     title: str
     status: str
-    current_contract_version: int
+    current_contract_version: Optional[int] = None
     created_at: datetime
-    active_tasks_count: int
+    active_tasks_count: Optional[int] = None
     pending_actions_count: int
 
 
@@ -146,6 +146,7 @@ class InvariantLedgerResponse(BaseModel):
     pass_count: int
     warn_count: int
     fail_count: int
+    unknown_count: int = 0
 
 
 class ActionProposalResponse(BaseModel):

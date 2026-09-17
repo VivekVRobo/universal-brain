@@ -323,6 +323,17 @@ class WorkspaceTransactionManager:
         self.workspace.status = WorkspaceStatus.READY
         return True
 
+    def verify_checkpoint_restored(self, checkpoint: WorkspaceCheckpoint) -> bool:
+        """Verify that every checkpoint target exactly matches its recorded pre-state."""
+        if not checkpoint.verify_digest():
+            return False
+        for target in checkpoint.targets:
+            canonical = confine_path(target, self.workspace_root)
+            observed_hash = hash_file(canonical) if canonical.is_file() else ""
+            if observed_hash != checkpoint.pre_hashes.get(target, ""):
+                return False
+        return True
+
     def rollback_checkpoint(self, checkpoint: WorkspaceCheckpoint) -> bool:
         """
         Executes formal rollback and verifies restored-state postcondition.

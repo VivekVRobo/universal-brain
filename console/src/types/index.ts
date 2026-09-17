@@ -140,6 +140,8 @@ export interface ActionProposal {
   evidence_items_count: number;
   payload_hash: string;
   authorization_digest: string;
+  authorization_approved_at: string;
+  nonce: string;
   created_at: string;
   expires_at: string;
   seconds_remaining: number;

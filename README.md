@@ -1,10 +1,74 @@
 # Universal Brain
 
-Universal Brain is a sovereign, local-first, multi-model executive system designed to preserve human intent from request through execution and verification.
+**Universal Brain** is a local-first executive runtime for coordinating models, tools, durable missions, permissions, recovery, and verification without assigning permanent authority to any single LLM.
 
-This repository preserves **Planning Baseline 0** as its constitutional/design baseline while also containing an exploratory stabilization runtime. Real external-provider execution remains operator-gated; deterministic Kernel, security, persistence, autonomy, world-model, and Intelligence Fabric slices are implemented and tested incrementally.
+It is an engineering project focused on one central question:
+
+> How can an AI-driven system execute useful work while keeping human intent, authority, state, evidence, and rollback structurally visible?
+
+## Start here
+
+| If you want to understand... | Start with |
+| --- | --- |
+| **What the system is** | This README + [System Architecture](docs/architecture/SYSTEM_ARCHITECTURE.md) |
+| **How model routing works** | [Intelligence Fabric](docs/architecture/INTELLIGENCE_FABRIC_SPEC.md) |
+| **How engineering missions recover** | [Engineering Agency V5.3](docs/architecture/ENGINEERING_AGENCY_V53.md) |
+| **Permissions and authority** | [Threat Model](docs/security/THREAT_MODEL.md) + [Alignment Invariants](docs/alignment/INVARIANTS.md) |
+| **What has actually been verified** | [V5.3 Verification Record](docs/testing/ENGINEERING_AGENCY_V53_VERIFICATION.md) |
+| **How to reproduce target-machine validation** | [V5.3 Validation Runbook](docs/infrastructure/V53_REAL_ENV_VALIDATION_RUNBOOK.md) |
+
+## Architecture at a glance
+
+```text
+Human request
+     │
+     ▼
+Alignment / requirements
+     │
+     ▼
+Deterministic Executive Kernel
+     │
+     ├── model routing / council
+     ├── durable mission state
+     ├── memory / world state
+     ├── engineering workers
+     └── Tool Gateway
+              │
+              ▼
+      authorized external action
+              │
+              ▼
+      verification + evidence
+              │
+              ▼
+        canonical event/state
+```
+
+The design keeps **canonical truth and authority outside the model**. Models are leased for reasoning; deterministic control-plane components retain state, permissions, auditability, and recovery.
+
+## Current maturity
+
+The repository contains implemented and tested engineering checkpoints through **V5.3 validation tooling**, but several real-environment claims remain deliberately gated until target-machine evidence exists. The project distinguishes mock/software verification from Windows, WSL2, Ollama, language-server, endurance, and physical-environment evidence.
+
+That distinction is intentional: **implemented is not treated as synonymous with proven in the target environment**.
+
+## Why follow this project
+
+Development is centered on concrete systems problems rather than model demos alone:
+
+- durable autonomous-mission recovery;
+- local/cloud model routing without surrendering canonical state;
+- explicit authority checks before consequential actions;
+- multi-repository engineering workflows;
+- semantic code intelligence and verification;
+- WSL2/Hyper-V isolation;
+- rollback and remediation;
+- target-machine endurance and evidence sealing.
+
+If you are interested in **AI agents, local AI, autonomous engineering systems, LLM orchestration, reliability, or safety-governed execution**, this repository is where those experiments and verification records are published.
 
 ---
+
 
 ## Governing Objective
 

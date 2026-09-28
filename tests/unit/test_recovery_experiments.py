@@ -1,8 +1,10 @@
 from universal_brain.engineering.recovery_experiments import (
+    ExperimentReport,
     run_experiment_1,
     run_experiment_2,
     run_experiment_3,
     run_experiment_4,
+    write_report,
 )
 
 
@@ -81,3 +83,14 @@ def test_exp4_measures_effect_receipt_crash_window_without_hiding_result():
     assert trial.metrics["effect_count_after_retry"] >= 1
     assert trial.metrics["retry_succeeded"] is True
     assert trial.details["tool_call_events"] >= 2
+
+
+def test_experiment_report_is_bound_to_source_and_self_verifying(tmp_path):
+    report = ExperimentReport(summary={"probe": {"trials": 0}})
+    path = tmp_path / "report.json"
+    write_report(report, path)
+
+    loaded = ExperimentReport.model_validate_json(path.read_text(encoding="utf-8"))
+    assert loaded.source_commit
+    assert loaded.payload_sha256
+    assert loaded.verify_digest()

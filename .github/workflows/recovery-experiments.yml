@@ -38,8 +38,20 @@ jobs:
             --trials 1 \
             --output recovery_experiments_smoke.json
 
-      - name: Upload smoke evidence
+      - name: Run publication candidate campaign
+        run: |
+          python scripts/recovery_experiments.py run --experiment 1 --trials 20 --output experiment_1.json
+          python scripts/recovery_experiments.py run --experiment 3 --trials 20 --output experiment_3.json
+          python scripts/recovery_experiments.py run --experiment 2 --trials 20 --output experiment_2.json
+          python scripts/recovery_experiments.py run --experiment 4 --trials 20 --output experiment_4.json
+
+      - name: Upload recovery evidence
         uses: actions/upload-artifact@v4
         with:
-          name: recovery-experiments-smoke
-          path: recovery_experiments_smoke.json
+          name: recovery-experiments-evidence
+          path: |
+            recovery_experiments_smoke.json
+            experiment_1.json
+            experiment_2.json
+            experiment_3.json
+            experiment_4.json

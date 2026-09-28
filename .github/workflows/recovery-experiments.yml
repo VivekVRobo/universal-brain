@@ -1,6 +1,9 @@
 name: Recovery Experiments
 
 on:
+  push:
+    branches:
+      - "research/recovery-experiments-v1"
   pull_request:
     paths:
       - "src/universal_brain/engineering/recovery_experiments.py"

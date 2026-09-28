@@ -7,8 +7,10 @@ synthetic conditions into production claims.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import platform
 import subprocess
 import sys
 import tempfile
@@ -52,11 +54,62 @@ class ExperimentTrial(BaseModel):
     details: dict[str, Any] = Field(default_factory=dict)
 
 
+def _detect_source_commit() -> str:
+    env_sha = os.environ.get("GITHUB_SHA", "").strip()
+    if env_sha:
+        return env_sha
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            text=True,
+            capture_output=True,
+            shell=False,
+            check=False,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _environment_metadata() -> dict[str, str]:
+    return {
+        "python_version": platform.python_version(),
+        "system": platform.system(),
+        "release": platform.release(),
+        "machine": platform.machine(),
+    }
+
+
 class ExperimentReport(BaseModel):
     schema_version: str = "ub-recovery-experiments/v1"
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    source_commit: str = Field(default_factory=_detect_source_commit)
+    environment: dict[str, str] = Field(default_factory=_environment_metadata)
     trials: list[ExperimentTrial] = Field(default_factory=list)
     summary: dict[str, Any] = Field(default_factory=dict)
+    payload_sha256: str = ""
+
+    def canonical_bytes(self) -> bytes:
+        payload = self.model_dump(mode="json")
+        payload["payload_sha256"] = ""
+        return json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+
+    def seal(self) -> "ExperimentReport":
+        digest = hashlib.sha256(self.canonical_bytes()).hexdigest()
+        return self.model_copy(update={"payload_sha256": digest})
+
+    def verify_digest(self) -> bool:
+        return bool(self.payload_sha256) and (
+            hashlib.sha256(self.canonical_bytes()).hexdigest() == self.payload_sha256
+        )
 
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
@@ -643,7 +696,8 @@ def run_all(*, trials_per_condition: int = 3) -> ExperimentReport:
 
 
 def write_report(report: ExperimentReport, path: Path) -> Path:
-    _atomic_json(path, report.model_dump(mode="json"))
+    sealed = report if report.verify_digest() else report.seal()
+    _atomic_json(path, sealed.model_dump(mode="json"))
     return path
 
 

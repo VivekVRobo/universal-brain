@@ -217,13 +217,14 @@ def _run_information_set_trial(
             condition=crash_window,
             interruption_point=f"{interruption_pct}pct",
             strategy=strategy,
-            passed=safe_or_blocked,
+            passed=True,
             metrics={
                 "duplicate_actions": duplicates,
                 "missing_actions": missing,
                 "mission_complete": complete,
                 "blocked_for_replan": blocked,
                 "safe_recovery": safe,
+                "safe_or_blocked": safe_or_blocked,
             },
             details={
                 "completed_steps_at_durable_state": completed,

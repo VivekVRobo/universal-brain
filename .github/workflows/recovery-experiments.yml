@@ -1,0 +1,42 @@
+name: Recovery Experiments
+
+on:
+  pull_request:
+    paths:
+      - "src/universal_brain/engineering/recovery_experiments.py"
+      - "scripts/recovery_experiments.py"
+      - "tests/unit/test_recovery_experiments.py"
+      - "docs/research/RECOVERY_EXPERIMENT_PROTOCOL_V1.md"
+      - ".github/workflows/recovery-experiments.yml"
+  workflow_dispatch:
+
+jobs:
+  recovery-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package and test dependencies
+        run: python -m pip install -e ".[dev]"
+
+      - name: Run focused experiment tests
+        run: python -m pytest -q tests/unit/test_recovery_experiments.py
+
+      - name: Run one trial smoke campaign
+        run: |
+          python scripts/recovery_experiments.py run \
+            --experiment all \
+            --trials 1 \
+            --output recovery_experiments_smoke.json
+
+      - name: Upload smoke evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-experiments-smoke
+          path: recovery_experiments_smoke.json

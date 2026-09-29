@@ -42,6 +42,22 @@ class ToolResult(BaseModel):
     evidence_refs: List[str] = Field(default_factory=list)
 
 
+class ReconciliationStatus(str, Enum):
+    """Outcome of checking whether an interrupted external effect occurred."""
+
+    CONFIRMED = "CONFIRMED"
+    ABSENT = "ABSENT"
+    UNKNOWN = "UNKNOWN"
+
+
+class ReconciliationResult(BaseModel):
+    """Tool supplied observation used to resolve an uncertain execution."""
+
+    status: ReconciliationStatus
+    result: Optional[ToolResult] = None
+    detail: str = ""
+
+
 class BaseTool(ABC):
     """Abstract base class for all tools registered in the Tool Gateway."""
 
@@ -67,3 +83,15 @@ class BaseTool(ABC):
     def rollback(self, rollback_data: Dict[str, Any]) -> bool:
         """Reverses the effect of an A1 action using recorded rollback data."""
         pass
+
+    def reconcile(self, args: Dict[str, Any], operation_id: str) -> ReconciliationResult:
+        """Observe an uncertain prior execution without causing another effect.
+
+        Tools that can prove the external outcome should override this method.
+        The default is deliberately UNKNOWN so the gateway fails closed instead
+        of replaying a state changing action after an ambiguous crash.
+        """
+        return ReconciliationResult(
+            status=ReconciliationStatus.UNKNOWN,
+            detail=f"tool {self.name!r} does not implement execution reconciliation",
+        )

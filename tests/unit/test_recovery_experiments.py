@@ -4,6 +4,7 @@ from universal_brain.engineering.recovery_experiments import (
     run_experiment_2,
     run_experiment_3,
     run_experiment_4,
+    run_experiment_5,
     write_report,
 )
 
@@ -94,3 +95,26 @@ def test_experiment_report_is_bound_to_source_and_self_verifying(tmp_path):
     assert loaded.source_commit
     assert loaded.payload_sha256
     assert loaded.verify_digest()
+
+
+
+def test_exp5_v2_recovers_all_crash_windows_without_duplicates():
+    trials = run_experiment_5(trials_per_condition=1)
+    assert len(trials) == 3
+    assert all(trial.passed for trial in trials)
+    assert all(trial.metrics["duplicate_actions"] == 0 for trial in trials)
+    assert all(trial.metrics["effect_count_after_retry"] == 1 for trial in trials)
+
+    by_condition = {trial.condition: trial for trial in trials}
+    unfinished = by_condition["hard_crash_before_effect"]
+    assert unfinished.metrics["effect_count_after_crash"] == 0
+    assert unfinished.metrics["recovered_legitimate_unfinished_work"] is True
+
+    after_effect = by_condition["hard_crash_after_effect"]
+    assert after_effect.metrics["effect_count_after_crash"] == 1
+    assert after_effect.details["initial_ledger_state"] == "EXECUTING"
+    assert after_effect.details["final_ledger_state"] == "EVIDENCE_COMMITTED"
+
+    receipt = by_condition["evidence_receipt_crash"]
+    assert receipt.details["initial_ledger_state"] == "EFFECT_CONFIRMED"
+    assert receipt.details["final_ledger_state"] == "EVIDENCE_COMMITTED"

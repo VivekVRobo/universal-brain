@@ -110,3 +110,11 @@ class BudgetExhaustedError(UniversalBrainError):
 class RollbackPreflightError(UniversalBrainError):
     """Raised when an A1 action fails reversibility preflight validation (ADR-0008)."""
     pass
+
+
+
+class OperationOutcomeUncertainError(InvariantViolationError):
+    """ALN-015: Interrupted action outcome cannot be proven safe to replay."""
+
+    def __init__(self, message: str, details: Optional[dict] = None) -> None:
+        super().__init__("ALN-015", message, details)

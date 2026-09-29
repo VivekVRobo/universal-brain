@@ -18,7 +18,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 
@@ -39,7 +39,14 @@ from universal_brain.executive.schemas import TaskDAG, TaskNode, TaskNodeStatus
 from universal_brain.kernel.capability import CapabilityService
 from universal_brain.kernel.event_store import EventStore
 from universal_brain.kernel.events import ActionClass, EventType
-from universal_brain.tools.base import BaseTool, ReversibilityClass, ToolResult
+from universal_brain.tools.base import (
+    BaseTool,
+    ReconciliationResult,
+    ReconciliationStatus,
+    ReversibilityClass,
+    ToolResult,
+)
+from universal_brain.tools.operation_ledger import DurableOperationLedger, OperationState
 from universal_brain.tools.gateway import ToolGateway
 
 
@@ -534,6 +541,31 @@ class _AppendTool(BaseTool):
         self.path.write_text("".join(f"{line}\n" for line in kept), encoding="utf-8")
         return True
 
+    def reconcile(self, args: dict[str, Any], operation_id: str) -> ReconciliationResult:
+        effect_id = str(args.get("operation_id") or "")
+        if not effect_id:
+            return ReconciliationResult(
+                status=ReconciliationStatus.UNKNOWN,
+                detail="operation_id is missing from the research tool request",
+            )
+        if effect_id in _read_lines(self.path):
+            result = ToolResult(
+                success=True,
+                output=effect_id,
+                evidence={"operation_id": effect_id, "reconciled": True},
+                rollback_data={"operation_id": effect_id},
+                reversibility_class=self.reversibility_class,
+            )
+            return ReconciliationResult(
+                status=ReconciliationStatus.CONFIRMED,
+                result=result,
+                detail="effect identifier is present in the target file",
+            )
+        return ReconciliationResult(
+            status=ReconciliationStatus.ABSENT,
+            detail="effect identifier is absent from the target file",
+        )
+
 
 class _CrashOnFirstEvidenceStore(EventStore):
     def __init__(self) -> None:
@@ -662,6 +694,291 @@ def run_experiment_4(*, trials_per_condition: int = 3) -> list[ExperimentTrial]:
     return trials
 
 
+
+class _HardCrashAppendTool(_AppendTool):
+    def __init__(self, path: Path, *, crash_before_effect: bool) -> None:
+        super().__init__(path)
+        self.crash_before_effect = crash_before_effect
+
+    def execute(self, args: dict[str, Any]) -> ToolResult:
+        if self.crash_before_effect:
+            os._exit(93)
+        operation_id = str(args["operation_id"])
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(operation_id + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os._exit(92)
+
+
+def _operation_worker(
+    root: Path,
+    mode: str,
+    project_id: str,
+    task_id: str,
+    operation_id: str,
+) -> None:
+    target = root / "effects.log"
+    ledger = DurableOperationLedger(root / "operation_ledger.sqlite3")
+    store = EventStore()
+    capability = CapabilityService()
+    gateway = ToolGateway(
+        event_store=store,
+        capability_service=capability,
+        operation_ledger=ledger,
+    )
+    gateway.register_tool(
+        _HardCrashAppendTool(
+            target,
+            crash_before_effect=(mode == "before_effect"),
+        )
+    )
+    contract = _research_contract()
+    token = capability.issue_token(
+        project_id=UUID(project_id),
+        task_id=UUID(task_id),
+        contract_version=contract.version,
+        action_class=ActionClass.A1,
+        target_resource=str(target),
+        allowed_operations=["research_append"],
+        idempotency_key=operation_id,
+    )
+    gateway.execute_tool(
+        tool_name="research_append",
+        args={"target": str(target), "operation_id": operation_id},
+        capability_token=token,
+        contract=contract,
+        target_resource=str(target),
+    )
+
+
+def _spawn_operation_worker(
+    root: Path,
+    *,
+    mode: str,
+    project_id: UUID,
+    task_id: UUID,
+    operation_id: str,
+) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    src_root = str(Path(__file__).resolve().parents[2])
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = src_root if not existing else f"{src_root}{os.pathsep}{existing}"
+    return subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "universal_brain.engineering.recovery_experiments",
+            "_operation_worker",
+            str(root),
+            mode,
+            str(project_id),
+            str(task_id),
+            operation_id,
+        ],
+        text=True,
+        capture_output=True,
+        shell=False,
+        check=False,
+        timeout=30,
+        env=env,
+    )
+
+
+def _v2_retry(
+    *,
+    root: Path,
+    project_id: UUID,
+    task_id: UUID,
+    operation_id: str,
+) -> tuple[ToolResult | None, EventStore, OperationState | None, str]:
+    target = root / "effects.log"
+    ledger = DurableOperationLedger(root / "operation_ledger.sqlite3")
+    store = EventStore()
+    capability = CapabilityService()
+    gateway = ToolGateway(
+        event_store=store,
+        capability_service=capability,
+        operation_ledger=ledger,
+    )
+    gateway.register_tool(_AppendTool(target))
+    contract = _research_contract()
+    token = capability.issue_token(
+        project_id=project_id,
+        task_id=task_id,
+        contract_version=contract.version,
+        action_class=ActionClass.A1,
+        target_resource=str(target),
+        allowed_operations=["research_append"],
+        idempotency_key=operation_id,
+    )
+    error = ""
+    result = None
+    try:
+        result = gateway.execute_tool(
+            tool_name="research_append",
+            args={"target": str(target), "operation_id": operation_id},
+            capability_token=token,
+            contract=contract,
+            target_resource=str(target),
+        )
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+
+    operation_key = ledger.operation_id(
+        project_id=project_id,
+        task_id=task_id,
+        tool_name="research_append",
+        idempotency_key=operation_id,
+    )
+    record = ledger.get(operation_key)
+    return result, store, record.state if record else None, error
+
+
+def run_experiment_5(*, trials_per_condition: int = 3) -> list[ExperimentTrial]:
+    """Measure V2 durable operation reconciliation against the V1 crash window."""
+
+    trials: list[ExperimentTrial] = []
+    conditions = (
+        "evidence_receipt_crash",
+        "hard_crash_after_effect",
+        "hard_crash_before_effect",
+    )
+
+    for condition in conditions:
+        for trial_index in range(trials_per_condition):
+            with tempfile.TemporaryDirectory(prefix=f"ub-exp5-{condition}-") as directory:
+                root = Path(directory)
+                target = root / "effects.log"
+                ledger = DurableOperationLedger(root / "operation_ledger.sqlite3")
+                project_id = uuid4()
+                task_id = uuid4()
+                operation_id = f"v2-{condition}-{trial_index:04d}"
+                crash_seen = False
+                initial_state = None
+
+                if condition == "evidence_receipt_crash":
+                    store = _CrashOnFirstEvidenceStore()
+                    capability = CapabilityService()
+                    gateway = ToolGateway(
+                        event_store=store,
+                        capability_service=capability,
+                        operation_ledger=ledger,
+                    )
+                    gateway.register_tool(_AppendTool(target))
+                    contract = _research_contract()
+                    token = capability.issue_token(
+                        project_id=project_id,
+                        task_id=task_id,
+                        contract_version=contract.version,
+                        action_class=ActionClass.A1,
+                        target_resource=str(target),
+                        allowed_operations=["research_append"],
+                        idempotency_key=operation_id,
+                    )
+                    try:
+                        gateway.execute_tool(
+                            tool_name="research_append",
+                            args={"target": str(target), "operation_id": operation_id},
+                            capability_token=token,
+                            contract=contract,
+                            target_resource=str(target),
+                        )
+                    except RuntimeError as exc:
+                        crash_seen = "injected crash" in str(exc)
+                    operation_key = ledger.operation_id(
+                        project_id=project_id,
+                        task_id=task_id,
+                        tool_name="research_append",
+                        idempotency_key=operation_id,
+                    )
+                    record = ledger.get(operation_key)
+                    initial_state = record.state if record else None
+                else:
+                    mode = "after_effect" if condition == "hard_crash_after_effect" else "before_effect"
+                    proc = _spawn_operation_worker(
+                        root,
+                        mode=mode,
+                        project_id=project_id,
+                        task_id=task_id,
+                        operation_id=operation_id,
+                    )
+                    expected_code = 92 if mode == "after_effect" else 93
+                    crash_seen = proc.returncode == expected_code
+                    operation_key = ledger.operation_id(
+                        project_id=project_id,
+                        task_id=task_id,
+                        tool_name="research_append",
+                        idempotency_key=operation_id,
+                    )
+                    record = ledger.get(operation_key)
+                    initial_state = record.state if record else None
+
+                count_after_crash = _read_lines(target).count(operation_id)
+                result, retry_store, final_state, retry_error = _v2_retry(
+                    root=root,
+                    project_id=project_id,
+                    task_id=task_id,
+                    operation_id=operation_id,
+                )
+                final_count = _read_lines(target).count(operation_id)
+                duplicate_count = max(0, final_count - 1)
+                expected_initial_count = 0 if condition == "hard_crash_before_effect" else 1
+                recovered_legitimate_work = (
+                    condition != "hard_crash_before_effect"
+                    or (count_after_crash == 0 and final_count == 1)
+                )
+                passed = (
+                    crash_seen
+                    and count_after_crash == expected_initial_count
+                    and final_count == 1
+                    and duplicate_count == 0
+                    and result is not None
+                    and final_state == OperationState.EVIDENCE_COMMITTED
+                    and recovered_legitimate_work
+                    and not retry_error
+                )
+                trials.append(
+                    ExperimentTrial(
+                        experiment_id="EXP5_V2_OPERATION_RECONCILIATION",
+                        trial_id=f"exp5-{condition}-{trial_index}",
+                        condition=condition,
+                        interruption_point=condition,
+                        strategy="durable_operation_ledger",
+                        passed=passed,
+                        metrics={
+                            "effect_count_after_crash": count_after_crash,
+                            "effect_count_after_retry": final_count,
+                            "duplicate_actions": duplicate_count,
+                            "retry_succeeded": result is not None,
+                            "recovered_legitimate_unfinished_work": recovered_legitimate_work,
+                        },
+                        details={
+                            "operation_id": operation_id,
+                            "crash_seen": crash_seen,
+                            "initial_ledger_state": (
+                                initial_state.value if initial_state is not None else None
+                            ),
+                            "final_ledger_state": (
+                                final_state.value if final_state is not None else None
+                            ),
+                            "retry_error": retry_error,
+                            "retry_tool_call_events": sum(
+                                1
+                                for event in retry_store.get_all_events()
+                                if event.event_type == EventType.TOOL_CALLED
+                            ),
+                            "retry_evidence_events": sum(
+                                1
+                                for event in retry_store.get_all_events()
+                                if event.event_type == EventType.EVIDENCE_PRODUCED
+                            ),
+                        },
+                    )
+                )
+    return trials
+
 def _aggregate(trials: list[ExperimentTrial]) -> dict[str, Any]:
     by_experiment: dict[str, dict[str, Any]] = {}
     grouped: dict[str, list[ExperimentTrial]] = defaultdict(list)
@@ -691,6 +1008,7 @@ def run_all(*, trials_per_condition: int = 3) -> ExperimentReport:
         *run_experiment_2(trials_per_condition=trials_per_condition),
         *run_experiment_3(trials_per_condition=trials_per_condition),
         *run_experiment_4(trials_per_condition=trials_per_condition),
+        *run_experiment_5(trials_per_condition=trials_per_condition),
     ]
     return ExperimentReport(trials=trials, summary=_aggregate(trials))
 
@@ -712,8 +1030,15 @@ def main(argv: list[str] | None = None) -> int:
     worker.add_argument("phase", choices=sorted(_PHASE_STATUS))
     worker.add_argument("crash_window", choices=["after_checkpoint", "effect_before_state"])
 
+    operation_worker = sub.add_parser("_operation_worker")
+    operation_worker.add_argument("root", type=Path)
+    operation_worker.add_argument("mode", choices=["after_effect", "before_effect"])
+    operation_worker.add_argument("project_id")
+    operation_worker.add_argument("task_id")
+    operation_worker.add_argument("operation_id")
+
     run = sub.add_parser("run")
-    run.add_argument("--experiment", choices=["1", "2", "3", "4", "all"], default="all")
+    run.add_argument("--experiment", choices=["1", "2", "3", "4", "5", "all"], default="all")
     run.add_argument("--trials", type=int, default=3)
     run.add_argument(
         "--output",
@@ -726,6 +1051,16 @@ def main(argv: list[str] | None = None) -> int:
         _phase_worker(args.root, args.phase, args.crash_window)
         return 91
 
+    if args.command == "_operation_worker":
+        _operation_worker(
+            args.root,
+            args.mode,
+            args.project_id,
+            args.task_id,
+            args.operation_id,
+        )
+        return 0
+
     if args.trials < 1:
         parser.error("--trials must be at least 1")
 
@@ -737,6 +1072,8 @@ def main(argv: list[str] | None = None) -> int:
         trials = run_experiment_3(trials_per_condition=args.trials)
     elif args.experiment == "4":
         trials = run_experiment_4(trials_per_condition=args.trials)
+    elif args.experiment == "5":
+        trials = run_experiment_5(trials_per_condition=args.trials)
     else:
         report = run_all(trials_per_condition=args.trials)
         write_report(report, args.output)

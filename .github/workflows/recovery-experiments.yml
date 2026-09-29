@@ -40,6 +40,12 @@ jobs:
           python -m pytest -q tests/unit/test_recovery_experiments.py
           python -m pytest -q tests/unit/test_operation_ledger.py
 
+      - name: Run ToolGateway regression gate
+        run: |
+          python -m pytest -q tests/security/test_s1_authority_regression.py
+          python -m pytest -q tests/integration/test_cellular_monolith.py
+          python -m pytest -q tests/unit/test_executive_cognitive.py
+
       - name: Run one trial smoke campaign
         run: |
           python scripts/recovery_experiments.py run \

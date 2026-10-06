@@ -14,7 +14,7 @@ The Universal Brain repository contains an extensive exploratory codebase spanni
 
 However, **Constitution 0.1 remains in Draft status** pending formal operator sign-off. Under strict constitutional governance, unratified code must not autonomously execute consequential actions, and runtime implementation must not proceed without authorization.
 
-Furthermore, a comprehensive independent security and architecture audit ([`CURRENT_UNIVERSAL_BRAIN_CODE_REVIEW.md`](file:///C:/Users/vivek/Documents/Codex/2026-09-02/about-openai-astra-chatgpt-conversation-6a97c18c/outputs/CURRENT_UNIVERSAL_BRAIN_CODE_REVIEW.md)) identified critical P0 authority vulnerabilities in capability binding, worker authentication, rollback verification, ambiguity classification, and execution boundaries.
+Furthermore, an independent security and architecture audit maintained outside this public repository identified critical P0 authority vulnerabilities in capability binding, worker authentication, rollback verification, ambiguity classification, and execution boundaries. The private machine-local audit path is intentionally not published here.
 
 This Authorization Record establishes a **narrow, bounded constitutional exception** to perform the stabilization sprint.
 

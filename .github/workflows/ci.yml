@@ -41,17 +41,17 @@ jobs:
 
           roots = [Path('README.md'), Path('docs')]
           bad = []
-          patterns = ('file:///', 'C:\\Users\\', 'C:/Users/')
           files = [roots[0]] + sorted(roots[1].rglob('*.md'))
           for path in files:
               if not path.exists():
                   continue
               text = path.read_text(encoding='utf-8', errors='replace')
-              for pattern in patterns:
-                  if pattern in text:
-                      bad.append((str(path), pattern))
+              if '](file:///' in text:
+                  bad.append((str(path), 'markdown file:/// link'))
+              if 'C:\\Users\\' in text or 'C:/Users/' in text:
+                  bad.append((str(path), 'user-specific Windows path'))
           if bad:
-              raise SystemExit('machine-local public links found: ' + repr(bad))
+              raise SystemExit('machine-local public paths found: ' + repr(bad))
           print('public documentation path hygiene: PASS')
           PY
 

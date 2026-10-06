@@ -1,0 +1,76 @@
+name: Release CI
+
+on:
+  push:
+    branches:
+      - main
+      - release/main-ci-gate
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install package and development dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+
+      - name: Validate package import
+        run: python -c "import universal_brain"
+
+      - name: Compile Python sources
+        run: python -m compileall -q src tests scripts
+
+      - name: Run regression suite
+        run: python -m pytest -q
+
+      - name: Validate public documentation path hygiene
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          roots = [Path('README.md'), Path('docs')]
+          bad = []
+          files = [roots[0]] + sorted(roots[1].rglob('*.md'))
+          for path in files:
+              if not path.exists():
+                  continue
+              text = path.read_text(encoding='utf-8', errors='replace')
+              if '](file:///' in text:
+                  bad.append((str(path), 'markdown file:/// link'))
+              if 'C:\\Users\\' in text or 'C:/Users/' in text:
+                  bad.append((str(path), 'user-specific Windows path'))
+          if bad:
+              raise SystemExit('machine-local public paths found: ' + repr(bad))
+          print('public documentation path hygiene: PASS')
+          PY
+
+      - name: Validate release package files
+        run: |
+          test -f LICENSE
+          test -f docs/RELEASE_READINESS.md
+          test -f docs/RELEASE_NOTES_DRAFT.md
+          python - <<'PY'
+          from pathlib import Path
+          license_text = Path('LICENSE').read_text(encoding='utf-8').lower()
+          assert 'all rights reserved' in license_text
+          readiness = Path('docs/RELEASE_READINESS.md').read_text(encoding='utf-8')
+          assert 'software/architecture checkpoint' in readiness
+          assert 'Windows/WSL2/Ollama/endurance' in readiness
+          print('release package contract: PASS')
+          PY
+
+      - name: State CI evidence boundary
+        run: |
+          echo 'This workflow verifies portable software/package/tests/docs only.'
+          echo 'It does not validate Windows sandboxing, WSL2/Hyper-V isolation, Ollama pressure handling, or endurance.'

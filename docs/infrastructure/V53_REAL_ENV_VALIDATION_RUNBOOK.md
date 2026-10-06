@@ -40,13 +40,13 @@ pyright-langserver --version
 Example Windows checkout:
 
 ```text
-C:\Users\vivek\Desktop\universal-brain
+%USERPROFILE%\Desktop\universal-brain
 ```
 
 might map inside WSL to:
 
 ```text
-/mnt/c/Users/vivek/Desktop/universal-brain
+/mnt/c/Users/<WINDOWS_USERNAME>/Desktop/universal-brain
 ```
 
 Use the real mapping for your machine.
@@ -59,7 +59,7 @@ Example with three Ollama models, pyright, WSL2 execution, real service lifecycl
 .\scripts\v53_windows_validate.ps1 `
   -Workspace . `
   -WslDistro "Ubuntu-24.04" `
-  -WslLinuxWorkspace "/mnt/c/Users/vivek/Desktop/universal-brain" `
+  -WslLinuxWorkspace "/mnt/c/Users/<WINDOWS_USERNAME>/Desktop/universal-brain" `
   -LspExecutable "pyright-langserver" `
   -LspArgs @("--stdio") `
   -LspFile "src/universal_brain/engineering/semantic.py" `
@@ -115,7 +115,7 @@ Then rerun validation with the record:
 .\scripts\v53_windows_validate.ps1 `
   -Workspace . `
   -WslDistro "Ubuntu-24.04" `
-  -WslLinuxWorkspace "/mnt/c/Users/vivek/Desktop/universal-brain" `
+  -WslLinuxWorkspace "/mnt/c/Users/<WINDOWS_USERNAME>/Desktop/universal-brain" `
   -LspExecutable "pyright-langserver" `
   -LspArgs @("--stdio") `
   -LspFile "src/universal_brain/engineering/semantic.py" `

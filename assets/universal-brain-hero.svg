@@ -1,0 +1,123 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="460" viewBox="0 0 1200 460" role="img" aria-labelledby="title desc">
+<title id="title">Universal Brain — Local First Autonomous Execution</title>
+<desc id="desc">A local first executive runtime where deterministic components retain canonical state, authority, recovery and evidence while models provide replaceable reasoning.</desc>
+<defs>
+  <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+    <stop stop-color="#F4F0E8"/>
+    <stop offset="1" stop-color="#E4EBEF"/>
+  </linearGradient>
+  <pattern id="grid" width="30" height="30" patternUnits="userSpaceOnUse">
+    <path d="M30 0H0V30" fill="none" stroke="#6F90A8" stroke-opacity=".09"/>
+  </pattern>
+  <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+    <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#132436" flood-opacity=".11"/>
+  </filter>
+</defs>
+
+<rect width="1200" height="460" rx="28" fill="url(#bg)"/>
+<rect width="1200" height="460" rx="28" fill="url(#grid)"/>
+
+<g font-family="Inter,Segoe UI,Helvetica Neue,Arial,sans-serif">
+  <text x="58" y="62" font-size="15" font-weight="700" letter-spacing="3.1" fill="#647985">LOCAL FIRST · AUTHORITY GATED · DURABLE · VERIFIABLE</text>
+  <text x="58" y="120" font-size="50" font-weight="800" fill="#132436">Universal Brain</text>
+  <text x="58" y="156" font-size="22" font-weight="650" fill="#395260">Autonomous execution without giving permanent authority to an LLM</text>
+
+  <text x="58" y="211" font-size="18.5" fill="#425866">Models reason. Deterministic components retain canonical truth, permissions,</text>
+  <text x="58" y="239" font-size="18.5" fill="#425866">mission state, auditability, recovery, and evidence.</text>
+
+  <g transform="translate(58 286)">
+    <rect width="160" height="42" rx="12" fill="#FFFFFF" fill-opacity=".66" stroke="#B3C3CA"/>
+    <text x="80" y="27" text-anchor="middle" font-size="13.5" font-weight="700" fill="#284252">DURABLE MISSIONS</text>
+
+    <rect x="174" width="160" height="42" rx="12" fill="#FFFFFF" fill-opacity=".66" stroke="#B3C3CA"/>
+    <text x="254" y="27" text-anchor="middle" font-size="13.5" font-weight="700" fill="#284252">AUTHORITY GATES</text>
+
+    <rect x="348" width="160" height="42" rx="12" fill="#FFFFFF" fill-opacity=".66" stroke="#B3C3CA"/>
+    <text x="428" y="27" text-anchor="middle" font-size="13.5" font-weight="700" fill="#284252">EVIDENCE FIRST</text>
+  </g>
+
+  <g transform="translate(58 354)">
+    <rect width="510" height="48" rx="14" fill="#263D49"/>
+    <circle cx="25" cy="24" r="7" fill="#C9965B"/>
+    <text x="45" y="30" font-size="13.5" font-weight="700" fill="#F4F0E8">V5.3 HARNESS IMPLEMENTED · TARGET MACHINE PROOF PENDING</text>
+  </g>
+
+  <g transform="translate(650 45)" filter="url(#shadow)">
+    <rect width="492" height="365" rx="22" fill="#FFFFFF" fill-opacity=".68" stroke="#B4C4CB"/>
+
+    <g text-anchor="middle" fill="#203540">
+      <g transform="translate(22 30)">
+        <rect width="118" height="54" rx="14" fill="#EDF2F4" stroke="#91A6AF"/>
+        <text x="59" y="22" font-size="14" font-weight="700">Human Intent</text>
+        <text x="59" y="40" font-size="10.5" fill="#607582">requirements</text>
+      </g>
+
+      <g transform="translate(183 20)">
+        <rect width="150" height="76" rx="16" fill="#D9E6EC" stroke="#658596" stroke-width="2"/>
+        <text x="75" y="27" font-size="15" font-weight="800">Executive Kernel</text>
+        <text x="75" y="48" font-size="10.5" fill="#557180">canonical state</text>
+        <text x="75" y="63" font-size="10.5" fill="#557180">permissions · recovery</text>
+      </g>
+
+      <g transform="translate(365 26)">
+        <rect width="105" height="56" rx="14" fill="#EAF0F2" stroke="#8DA2AC"/>
+        <text x="52.5" y="23" font-size="13" font-weight="700">Models</text>
+        <text x="52.5" y="41" font-size="10.5" fill="#607582">routing / council</text>
+      </g>
+
+      <g transform="translate(365 112)">
+        <rect width="105" height="56" rx="14" fill="#EAF0F2" stroke="#8DA2AC"/>
+        <text x="52.5" y="23" font-size="13" font-weight="700">Missions</text>
+        <text x="52.5" y="41" font-size="10.5" fill="#607582">durable state</text>
+      </g>
+
+      <g transform="translate(365 198)">
+        <rect width="105" height="56" rx="14" fill="#EAF0F2" stroke="#8DA2AC"/>
+        <text x="52.5" y="23" font-size="13" font-weight="700">Workers</text>
+        <text x="52.5" y="41" font-size="10.5" fill="#607582">scoped execution</text>
+      </g>
+
+      <g transform="translate(183 132)">
+        <rect width="150" height="66" rx="15" fill="#F2E7D9" stroke="#B78555" stroke-width="2"/>
+        <text x="75" y="25" font-size="14.5" font-weight="800">Tool Gateway</text>
+        <text x="75" y="46" font-size="10.5" fill="#76583E">deny by default</text>
+      </g>
+
+      <g transform="translate(183 230)">
+        <rect width="150" height="66" rx="15" fill="#E3ECE6" stroke="#789783"/>
+        <text x="75" y="25" font-size="14.5" font-weight="800">Verification</text>
+        <text x="75" y="46" font-size="10.5" fill="#5F7667">tests · evidence</text>
+      </g>
+
+      <g transform="translate(22 248)">
+        <rect width="118" height="54" rx="14" fill="#E1E9EC" stroke="#8198A4"/>
+        <text x="59" y="22" font-size="13" font-weight="700">Event State</text>
+        <text x="59" y="40" font-size="10.5" fill="#607582">audit · continuity</text>
+      </g>
+    </g>
+
+    <g fill="none" stroke="#718894" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M140 57H183"/>
+      <path d="M333 58H365"/>
+      <path d="M258 96V132"/>
+      <path d="M333 58H350V140H365"/>
+      <path d="M333 58H350V226H365"/>
+      <path d="M258 198V230"/>
+      <path d="M183 263H140"/>
+      <path d="M81 248V225H258V198"/>
+    </g>
+    <g fill="#718894">
+      <path d="M180 52l10 5-10 5z"/>
+      <path d="M362 53l10 5-10 5z"/>
+      <path d="M253 128l5 10 5-10z"/>
+      <path d="M362 135l10 5-10 5z"/>
+      <path d="M362 221l10 5-10 5z"/>
+      <path d="M253 226l5 10 5-10z"/>
+      <path d="M143 258l-10 5 10 5z"/>
+      <path d="M253 202l5-10 5 10z"/>
+    </g>
+
+    <text x="246" y="340" text-anchor="middle" font-size="11.5" font-weight="700" letter-spacing="1.8" fill="#607582">REASONING IS REPLACEABLE · AUTHORITY IS STRUCTURAL</text>
+  </g>
+</g>
+</svg>

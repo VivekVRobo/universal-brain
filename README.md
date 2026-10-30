@@ -20,6 +20,7 @@
 
 <p align="center">
   <a href="docs/architecture/SYSTEM_ARCHITECTURE.md"><strong>Architecture</strong></a> ·
+  <a href="docs/architecture/GLOSSARY.md"><strong>Architecture Glossary</strong></a> ·
   <a href="docs/testing/ENGINEERING_AGENCY_V53_VERIFICATION.md"><strong>Verification Record</strong></a> ·
   <a href="docs/security/THREAT_MODEL.md"><strong>Threat Model</strong></a> ·
   <a href="console/"><strong>Operator Console</strong></a> ·
@@ -278,6 +279,7 @@ The console is an operator surface over the system. It does not replace the auth
 | If you want to understand | Read |
 | --- | --- |
 | Overall system boundaries | [System Architecture](docs/architecture/SYSTEM_ARCHITECTURE.md) |
+| Core architecture terminology | [Architecture Glossary](docs/architecture/GLOSSARY.md) |
 | Executive model and kernel separation | [Executive Brain Spec](docs/architecture/EXECUTIVE_BRAIN_SPEC.md) |
 | Model routing and council behavior | [Intelligence Fabric](docs/architecture/INTELLIGENCE_FABRIC_SPEC.md) |
 | Engineering runtime | [Engineering Agency V5.3](docs/architecture/ENGINEERING_AGENCY_V53.md) |

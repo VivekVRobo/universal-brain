@@ -277,6 +277,7 @@ The console is an operator surface over the system. It does not replace the auth
 
 | If you want to understand | Read |
 | --- | --- |
+| Newcomer architecture glossary | [Glossary](docs/NEWCOMER_GLOSSARY.md) | Definitions of recurring control-plane, authority, verification, and recovery terms |
 | Overall system boundaries | [System Architecture](docs/architecture/SYSTEM_ARCHITECTURE.md) |
 | Executive model and kernel separation | [Executive Brain Spec](docs/architecture/EXECUTIVE_BRAIN_SPEC.md) |
 | Model routing and council behavior | [Intelligence Fabric](docs/architecture/INTELLIGENCE_FABRIC_SPEC.md) |

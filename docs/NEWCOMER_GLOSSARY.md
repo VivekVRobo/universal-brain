@@ -8,7 +8,7 @@ The **Executive Kernel** is the deterministic control-plane core. It owns canoni
 
 The Kernel is the authority boundary: models can propose actions, but they do not directly own canonical state or permissions.
 
-**Authoritative references:** [Executive Brain Specification](architecture/EXECUTIVE_BRAIN_SPEC.md), [Threat Model](../security/THREAT_MODEL.md)
+**Authoritative references:** [Executive Brain Specification](architecture/EXECUTIVE_BRAIN_SPEC.md), [Threat Model](security/THREAT_MODEL.md)
 
 ## Executive Model
 
